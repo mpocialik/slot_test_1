@@ -1,4 +1,5 @@
 import AVFoundation
+import CoreMedia
 import Foundation
 import Observation
 import Speech
@@ -23,6 +24,22 @@ final class LiveSpeechTranscriber {
     /// seconds. `0` publishes results in real time.
     private(set) var transcriptUpdateInterval: TimeInterval = 0
 
+    /// When enabled, the transcript is annotated with on-device speaker
+    /// labels. The setting is read when a listening session starts.
+    var usesSpeakerLabels = true {
+        didSet {
+            guard oldValue != usesSpeakerLabels else { return }
+            flushTranscriptDisplay()
+        }
+    }
+
+    /// On-device speaker diarization state and speaker-label lookup.
+    let diarization: SpeakerDiarizationService
+
+    private let diarizationCapture: DiarizationAudioCapture
+    private var diarizationTask: Task<Void, Never>?
+    private var sessionUsesSpeakerLabels = false
+
     private var sessionGeneration = 0
 
     private let audioEngine = AVAudioEngine()
@@ -34,11 +51,35 @@ final class LiveSpeechTranscriber {
     private var converterBox: AudioConverterBox?
     private var tapInstalled = false
 
-    private var finalizedTranscript = ""
-    private var volatileTranscript = ""
+    private struct TranscriptTurn: Identifiable {
+        let id = UUID()
+        let text: String
+        let startTime: TimeInterval
+        let endTime: TimeInterval
+    }
+
+    private var finalizedTurns: [TranscriptTurn] = []
+    private var volatileTurn: TranscriptTurn?
+
+    /// The audio-time position where the current listening session begins.
+    /// Speech and diarization timelines both restart at zero each session, so
+    /// this keeps turns from different sessions comparable.
+    private var sessionTimelineStart: TimeInterval = 0
+    private var timelineOffset: TimeInterval = 0
+    private var lastTurnEnd: TimeInterval = 0
 
     private var displayTask: Task<Void, Never>?
     private var lastDisplayUpdate = Date.distantPast
+
+    init() {
+        let capture = DiarizationAudioCapture()
+        diarizationCapture = capture
+        let service = SpeakerDiarizationService(capture: capture)
+        diarization = service
+        service.onSegmentsChanged = { [weak self] in
+            self?.diarizationDidUpdate()
+        }
+    }
 
     // MARK: - Public controls
 
@@ -98,9 +139,17 @@ final class LiveSpeechTranscriber {
         displayTask?.cancel()
         displayTask = nil
         transcript = ""
-        finalizedTranscript = ""
-        volatileTranscript = ""
+        finalizedTurns.removeAll()
+        volatileTurn = nil
         lastDisplayUpdate = .distantPast
+        lastTurnEnd = sessionTimelineStart
+        diarization.clearLabels()
+
+        if !isListening {
+            sessionTimelineStart = 0
+            timelineOffset = 0
+            lastTurnEnd = 0
+        }
     }
 
     /// Updates the artificial display lag. Cancels any pending update and
@@ -111,9 +160,9 @@ final class LiveSpeechTranscriber {
     }
 
     private func commitVolatileTranscript() {
-        if !volatileTranscript.isEmpty {
-            finalizedTranscript += volatileTranscript
-            volatileTranscript = ""
+        if let volatileTurn {
+            finalizedTurns.append(volatileTurn)
+            self.volatileTurn = nil
         }
         flushTranscriptDisplay()
     }
@@ -211,6 +260,23 @@ final class LiveSpeechTranscriber {
         let analyzer = SpeechAnalyzer(modules: [transcriber])
         self.analyzer = analyzer
 
+        // SpeechAnalyzer and the diarizer each start their own timeline at
+        // zero. Offset this session so labels stay aligned when the user stops
+        // and starts listening without clearing the transcript.
+        sessionTimelineStart = timelineOffset
+        lastTurnEnd = sessionTimelineStart
+        sessionUsesSpeakerLabels = usesSpeakerLabels
+        let diarizationGeneration = diarization.startCapture(
+            enabled: usesSpeakerLabels,
+            timeOffset: sessionTimelineStart
+        )
+        if usesSpeakerLabels {
+            diarizationTask?.cancel()
+            diarizationTask = Task { [weak self] in
+                await self?.diarization.loadAndStartProcessing(generation: diarizationGeneration)
+            }
+        }
+
         try startAudioEngine(converter: converterBox, continuation: continuation)
         guard generation == sessionGeneration else { return }
 
@@ -239,16 +305,39 @@ final class LiveSpeechTranscriber {
     }
 
     private func consume(_ result: SpeechTranscriber.Result) {
-        let segment = String(result.text.characters)
+        let text = String(result.text.characters)
+        guard !text.isEmpty else { return }
+
+        let start = seconds(result.range.start).map { sessionTimelineStart + $0 } ?? lastTurnEnd
+        let end = seconds(result.range.end).map { sessionTimelineStart + $0 } ?? start
+        let turn = TranscriptTurn(
+            text: text,
+            startTime: max(sessionTimelineStart, start),
+            endTime: max(start, end)
+        )
 
         if result.isFinal {
-            finalizedTranscript += segment
-            volatileTranscript = ""
+            if let volatileTurn, rangesOverlap(volatileTurn, turn) {
+                self.volatileTurn = nil
+            }
+            finalizedTurns.append(turn)
         } else {
-            volatileTranscript = segment
+            volatileTurn = turn
         }
 
+        lastTurnEnd = max(lastTurnEnd, turn.endTime)
         publishTranscript()
+    }
+
+    private func seconds(_ time: CMTime) -> TimeInterval? {
+        let seconds = CMTimeGetSeconds(time)
+        guard seconds.isFinite, seconds >= 0 else { return nil }
+        return seconds
+    }
+
+    private func rangesOverlap(_ first: TranscriptTurn, _ second: TranscriptTurn) -> Bool {
+        if first.startTime == second.startTime { return true }
+        return first.startTime < second.endTime && second.startTime < first.endTime
     }
 
     /// Throttles visible transcript updates so the display can be slowed down
@@ -286,7 +375,42 @@ final class LiveSpeechTranscriber {
 
     private func showCurrentTranscript() {
         lastDisplayUpdate = .now
-        transcript = finalizedTranscript + volatileTranscript
+        transcript = renderTranscript()
+    }
+
+    private func diarizationDidUpdate() {
+        // Speaker labels can arrive after the words are already on screen.
+        // Refresh immediately rather than waiting for the display throttle.
+        flushTranscriptDisplay()
+    }
+
+    private func renderTranscript() -> String {
+        let turns = finalizedTurns + (volatileTurn.map { [$0] } ?? [])
+
+        guard usesSpeakerLabels, sessionUsesSpeakerLabels, diarization.hasSpeakers else {
+            return turns.map(\.text).joined()
+        }
+
+        var groups: [(slot: Int?, text: String)] = []
+        for turn in turns {
+            let slot = diarization.speakerSlot(for: turn.startTime...turn.endTime)
+            if let last = groups.last, last.slot == slot {
+                groups[groups.count - 1].text += turn.text
+            } else {
+                groups.append((slot, turn.text))
+            }
+        }
+
+        let rendered = groups.compactMap { group -> String? in
+            let text = group.text.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !text.isEmpty else { return nil }
+            if let slot = group.slot, let number = diarization.speakerNumber(for: slot) {
+                return "Speaker \(number): \(text)"
+            }
+            return text
+        }
+
+        return rendered.joined(separator: "\n")
     }
 
     private func startAudioEngine(
@@ -300,11 +424,19 @@ final class LiveSpeechTranscriber {
             throw CaptureError.noMicrophone
         }
 
-        inputNode.installTap(onBus: 0, bufferSize: 8_192, format: inputFormat) { buffer, time in
+        let speakerCapture = diarizationCapture
+        inputNode.installTap(onBus: 0, bufferSize: 8_192, format: inputFormat) { buffer, _ in
             do {
-                for input in try converter.convert(buffer, at: time) {
+                // A nil start time means "immediately after the previous
+                // buffer", keeping the analyzer timeline aligned with the
+                // separate 16 kHz diarization stream.
+                for input in try converter.convert(buffer, at: nil) {
                     continuation.yield(input)
                 }
+
+                // Only feed diarization buffers that also reached the speech
+                // analyzer, so the two timelines cannot drift apart.
+                speakerCapture.append(buffer)
             } catch {
                 // A failed buffer is skipped; capture continues with the next one.
             }
@@ -334,6 +466,9 @@ final class LiveSpeechTranscriber {
 
     private func tearDown() async {
         isListening = false
+
+        diarizationTask?.cancel()
+        diarizationTask = nil
 
         displayTask?.cancel()
         displayTask = nil
@@ -368,9 +503,21 @@ final class LiveSpeechTranscriber {
         self.analyzer = nil
         self.transcriber = nil
 
+        // Do not wait for a first-run model download to finish. The detached
+        // load keeps the model for the next session; its continuation checks
+        // the session generation before starting inference.
+        await diarization.endSession()
+        updateTimelineOffset()
+
         #if os(iOS) || os(visionOS)
         try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
         #endif
+    }
+
+    private func updateTimelineOffset() {
+        let lastTurn = finalizedTurns.map(\.endTime).max() ?? 0
+        let lastSpeaker = diarization.segments.map(\.endTime).max() ?? 0
+        timelineOffset = max(timelineOffset, lastTurn, lastSpeaker)
     }
 
     // MARK: - Errors

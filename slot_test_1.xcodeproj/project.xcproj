@@ -10,6 +10,14 @@
       "Base",
     ],
   },
+  "packages": [
+    {
+      "kind": "remote",
+      "repository": "https://github.com/FluidInference/FluidAudio.git",
+      "version": { "version": "0.18.2" },
+      "traits": [ "Diarizer" ],
+    },
+  ],
   "files": [
     { "kind": "folder", "path": "slot_test_1", "target-membership": [ "slot_test_1" ] },
     {
@@ -30,6 +38,13 @@
         "compile-sources",
         "frameworks",
         "resources",
+      ],
+      "package-product-members": [
+        {
+          "package": "FluidAudio",
+          "product-name": "FluidAudio",
+          "build-phase": { "build-phase": "frameworks" },
+        },
       ],
       "build-settings": {
         "ASSETCATALOG_COMPILER_APPICON_NAME": "AppIcon",

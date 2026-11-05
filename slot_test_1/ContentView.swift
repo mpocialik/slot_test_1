@@ -75,6 +75,21 @@ struct ContentView: View {
     }
 
     private var statusRow: some View {
+        ViewThatFits(in: .horizontal) {
+            HStack(spacing: 8) {
+                statusPills
+                Spacer(minLength: 0)
+                onDeviceLabel
+            }
+
+            HStack(spacing: 8) {
+                statusPills
+                Spacer(minLength: 0)
+            }
+        }
+    }
+
+    private var statusPills: some View {
         HStack(spacing: 8) {
             StatusPill(
                 text: tester.model.availabilityText,
@@ -88,14 +103,22 @@ struct ContentView: View {
                 color: statusColor
             )
 
-            Spacer(minLength: 0)
-
-            Label("On device", systemImage: "lock.shield")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .labelStyle(.titleAndIcon)
-                .lineLimit(1)
+            if tester.speakerLabelsEnabled {
+                StatusPill(
+                    text: tester.speakerDiarizationShortStatus,
+                    systemImage: "person.2.fill",
+                    color: speakerStatusColor
+                )
+            }
         }
+    }
+
+    private var onDeviceLabel: some View {
+        Label("On device", systemImage: "lock.shield")
+            .font(.caption)
+            .foregroundStyle(.secondary)
+            .labelStyle(.titleAndIcon)
+            .lineLimit(1)
     }
 
     private var controls: some View {
@@ -185,14 +208,28 @@ struct ContentView: View {
             showsActivity: tester.isListening,
             copyText: tester.transcript
         ) {
-            if tester.transcript.isEmpty {
-                Text(tester.isListening
-                     ? "Listening… start speaking."
-                     : "Tap Start Listening and speak. Your words will appear here in real time.")
-                    .foregroundStyle(.secondary)
-            } else {
-                Text(tester.transcript)
-                    .textSelection(.enabled)
+            VStack(alignment: .leading, spacing: 10) {
+                if tester.transcript.isEmpty {
+                    Text(tester.isListening
+                         ? "Listening… start speaking."
+                         : "Tap Start Listening and speak. Your words will appear here in real time.")
+                        .foregroundStyle(.secondary)
+                } else {
+                    Text(tester.transcript)
+                        .textSelection(.enabled)
+                }
+
+                if tester.isListening, tester.speakerLabelsEnabled, tester.isSpeakerDiarizationPreparing {
+                    Label(tester.speakerDiarizationStatus, systemImage: "person.2.wave.2")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+
+                if let error = tester.speakerDiarizationError {
+                    Label(error, systemImage: "person.2.badge.xmark")
+                        .font(.caption)
+                        .foregroundStyle(.orange)
+                }
             }
         }
         .frame(minHeight: 150, alignment: .top)
@@ -224,7 +261,7 @@ struct ContentView: View {
 
     private var footer: some View {
         Label(
-            "Speech is transcribed on device. Transcripts are processed only by Apple's on-device foundation model.",
+            "Speech and speaker labels are processed on device. Transcripts are processed only by Apple's on-device foundation model.",
             systemImage: "lock.shield"
         )
         .font(.caption)
@@ -300,6 +337,19 @@ struct ContentView: View {
         return tester.isListening ? .green : .secondary
     }
 
+    private var speakerStatusColor: Color {
+        if tester.speakerDiarizationError != nil {
+            return .orange
+        }
+        if tester.isSpeakerDiarizationRunning {
+            return .green
+        }
+        if tester.isSpeakerDiarizationPreparing {
+            return .blue
+        }
+        return .secondary
+    }
+
     private var responsePlaceholder: String {
         if tester.autoSendEnabled {
             return "The newest transcript is sent to the model automatically every \(Int(tester.cadenceSeconds)) seconds."
@@ -328,6 +378,8 @@ private struct ConfigurationPanel: View {
                 VStack(alignment: .leading, spacing: 20) {
                     transcriptionSpeedSection
                     Divider()
+                    speakerLabelsSection
+                    Divider()
                     llmSpeedSection
                     Divider()
                     conversationSection
@@ -336,7 +388,7 @@ private struct ConfigurationPanel: View {
                 }
                 .padding(.top, 10)
             } label: {
-                Text("Speed, memory, and model instructions")
+                Text("Speed, speakers, memory, and model instructions")
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
             }
@@ -375,6 +427,44 @@ private struct ConfigurationPanel: View {
             }
 
             Text("Artificial delay before new transcript text appears. 0 ms is real time.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+    }
+
+    private var speakerLabelsSection: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Label("Speaker labels", systemImage: "person.2.wave.2")
+                .font(.subheadline.weight(.semibold))
+
+            Toggle(isOn: $tester.speakerLabelsEnabled) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Label who is speaking")
+                    Text("Adds “Speaker 1”, “Speaker 2”, and so on to the transcript, entirely on device.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+
+            HStack(spacing: 8) {
+                Text(tester.speakerDiarizationStatus)
+                    .font(.caption)
+                    .foregroundStyle(tester.speakerDiarizationError == nil ? Color.secondary : Color.orange)
+
+                if tester.isSpeakerDiarizationPreparing,
+                   let progress = tester.speakerDiarizationProgress {
+                    ProgressView(value: progress)
+                        .frame(width: 90)
+                }
+            }
+
+            if let error = tester.speakerDiarizationError {
+                Text(error)
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+            }
+
+            Text("Up to four speakers. The first session downloads roughly 100–250 MB of speaker models. Turning labels off hides them immediately; diarization starts with the next listening session.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
         }

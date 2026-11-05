@@ -8,10 +8,12 @@ final class TesterViewModel {
     let model = FoundationModelClient()
 
     private static let instructionsDefaultsKey = "systemInstructions"
+    private static let speakerLabelsDefaultsKey = "speakerLabelsEnabled"
 
     private static let defaultInstructions = """
     You are a helpful assistant running inside a live speech transcription tester. \
     The user's message is a speech transcript and may contain recognition errors. \
+    The transcript may label turns as "Speaker 1:", "Speaker 2:", and so on. \
     Reply concisely in plain text, in the same language as the transcript.
     """
 
@@ -25,9 +27,25 @@ final class TesterViewModel {
     var autoSendEnabled = true
     var cadenceSeconds: Double = 5
 
+    /// Adds on-device speaker labels to the transcript. The setting is read
+    /// when a listening session starts.
+    var speakerLabelsEnabled: Bool {
+        didSet {
+            guard oldValue != speakerLabelsEnabled else { return }
+            transcriber.usesSpeakerLabels = speakerLabelsEnabled
+            UserDefaults.standard.set(speakerLabelsEnabled, forKey: Self.speakerLabelsDefaultsKey)
+        }
+    }
+
     init() {
         instructions = UserDefaults.standard.string(forKey: Self.instructionsDefaultsKey)
             ?? Self.defaultInstructions
+
+        let savedSpeakerLabels = UserDefaults.standard.object(
+            forKey: Self.speakerLabelsDefaultsKey
+        ) as? Bool ?? true
+        speakerLabelsEnabled = savedSpeakerLabels
+        transcriber.usesSpeakerLabels = savedSpeakerLabels
     }
 
     /// Fast speech results appear sooner but may be less accurate. Applies
@@ -101,6 +119,42 @@ final class TesterViewModel {
 
     var needsPermissionSettings: Bool {
         transcriber.needsPermissionSettings
+    }
+
+    var speakerDiarizationStatus: String {
+        transcriber.diarization.statusMessage
+    }
+
+    var speakerDiarizationError: String? {
+        transcriber.diarization.errorMessage
+    }
+
+    var speakerDiarizationProgress: Double? {
+        transcriber.diarization.downloadProgress
+    }
+
+    var isSpeakerDiarizationPreparing: Bool {
+        transcriber.diarization.isPreparing
+    }
+
+    var isSpeakerDiarizationRunning: Bool {
+        transcriber.diarization.isRunning
+    }
+
+    var speakerDiarizationShortStatus: String {
+        if transcriber.diarization.errorMessage != nil {
+            return "Speakers unavailable"
+        }
+        if transcriber.diarization.isPreparing {
+            return "Speakers loading"
+        }
+        if transcriber.diarization.isRunning {
+            return "Speakers on"
+        }
+        if transcriber.diarization.isModelLoaded {
+            return "Speakers ready"
+        }
+        return "Speakers off"
     }
 
     var canSendNow: Bool {
