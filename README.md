@@ -35,6 +35,13 @@ Sortformer is optimized for conversations and supports up to four speakers.
 It runs through Core ML on the Neural Engine where available. Diarization is
 best-effort: if the model cannot load, transcription continues without labels.
 
+Transcription is always handled by Apple's `SpeechAnalyzer` /
+`SpeechTranscriber`. FluidAudio is used only to compute speaker labels.
+Turning **Speaker labels** off hides the labels immediately and starts no
+FluidAudio work for subsequent listening sessions; Apple's transcription
+pipeline is unaffected. A model already loaded from an earlier session stays
+cached in memory so a later restart is fast.
+
 ## Requirements
 
 - Xcode 27.3 or later.

@@ -157,6 +157,43 @@ final class TesterViewModel {
         return "Speakers off"
     }
 
+    /// Longer status used by the on-screen setup indicator.
+    var speakerDiarizationDisplayStatus: String {
+        if transcriber.diarization.errorMessage != nil {
+            return "Speaker labels unavailable"
+        }
+        if transcriber.diarization.isPreparing {
+            return transcriber.diarization.statusMessage
+        }
+        if transcriber.diarization.isRunning {
+            return "Speaker labels on"
+        }
+        if transcriber.diarization.isModelLoaded {
+            return "Speaker labels ready"
+        }
+        return "Speaker model not loaded yet"
+    }
+
+    var speakerDiarizationDetail: String {
+        if let error = transcriber.diarization.errorMessage {
+            return error
+        }
+        if transcriber.diarization.isPreparing {
+            return "One-time download and compile. The model is cached on this device for next time."
+        }
+        if transcriber.diarization.isRunning {
+            return "Who-is-speaking labels are being applied to the live transcript."
+        }
+        if transcriber.diarization.isModelLoaded {
+            return "The speaker model is loaded. Labels will appear when you start listening."
+        }
+        return "The speaker model downloads the first time you start listening. Transcription itself always uses Apple's Speech framework."
+    }
+
+    var isSpeakerDiarizationReady: Bool {
+        transcriber.diarization.isModelLoaded
+    }
+
     var canSendNow: Bool {
         !transcript.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && model.isAvailable
     }

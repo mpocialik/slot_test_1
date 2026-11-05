@@ -27,6 +27,11 @@ struct ContentView: View {
                 }
 
                 controls
+
+                if tester.speakerLabelsEnabled {
+                    diarizationStatusIndicator
+                }
+
                 transcriptPanel
                 responsePanel
                 configurationPanel
@@ -139,6 +144,91 @@ struct ContentView: View {
         }
     }
 
+    private var diarizationStatusIndicator: some View {
+        HStack(alignment: .top, spacing: 10) {
+            Image(systemName: diarizationStatusIcon)
+                .font(.callout)
+                .foregroundStyle(diarizationStatusColor)
+                .padding(.top, 1)
+
+            VStack(alignment: .leading, spacing: 6) {
+                HStack(spacing: 8) {
+                    Text(tester.speakerDiarizationDisplayStatus)
+                        .font(.callout.weight(.semibold))
+                        .fixedSize(horizontal: false, vertical: true)
+
+                    if tester.isSpeakerDiarizationPreparing,
+                       let progress = tester.speakerDiarizationProgress {
+                        Text("\(Int(progress * 100))%")
+                            .font(.caption.monospacedDigit())
+                            .foregroundStyle(.secondary)
+                    }
+
+                    Spacer(minLength: 0)
+
+                    if tester.isSpeakerDiarizationReady {
+                        Text("READY")
+                            .font(.caption2.weight(.bold))
+                            .foregroundStyle(.green)
+                            .padding(.horizontal, 7)
+                            .padding(.vertical, 3)
+                            .background(.green.opacity(0.12), in: Capsule())
+                    }
+                }
+
+                if tester.isSpeakerDiarizationPreparing {
+                    if let progress = tester.speakerDiarizationProgress {
+                        ProgressView(value: progress)
+                            .tint(diarizationStatusColor)
+                    } else {
+                        ProgressView()
+                            .controlSize(.small)
+                    }
+                }
+
+                Text(tester.speakerDiarizationDetail)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .padding(12)
+        .background(
+            diarizationStatusColor.opacity(0.08),
+            in: RoundedRectangle(cornerRadius: 14, style: .continuous)
+        )
+        .overlay {
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .strokeBorder(diarizationStatusColor.opacity(0.18), lineWidth: 1)
+        }
+    }
+
+    private var diarizationStatusIcon: String {
+        if tester.speakerDiarizationError != nil {
+            return "exclamationmark.triangle.fill"
+        }
+        if tester.isSpeakerDiarizationPreparing {
+            return "arrow.down.circle.fill"
+        }
+        if tester.isSpeakerDiarizationReady {
+            return "checkmark.circle.fill"
+        }
+        return "person.2.fill"
+    }
+
+    private var diarizationStatusColor: Color {
+        if tester.speakerDiarizationError != nil {
+            return .orange
+        }
+        if tester.isSpeakerDiarizationPreparing {
+            return .blue
+        }
+        if tester.isSpeakerDiarizationReady {
+            return .green
+        }
+        return .secondary
+    }
+
     private var primaryButton: some View {
         Button {
             Task {
@@ -208,28 +298,14 @@ struct ContentView: View {
             showsActivity: tester.isListening,
             copyText: tester.transcript
         ) {
-            VStack(alignment: .leading, spacing: 10) {
-                if tester.transcript.isEmpty {
-                    Text(tester.isListening
-                         ? "Listening… start speaking."
-                         : "Tap Start Listening and speak. Your words will appear here in real time.")
-                        .foregroundStyle(.secondary)
-                } else {
-                    Text(tester.transcript)
-                        .textSelection(.enabled)
-                }
-
-                if tester.isListening, tester.speakerLabelsEnabled, tester.isSpeakerDiarizationPreparing {
-                    Label(tester.speakerDiarizationStatus, systemImage: "person.2.wave.2")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-
-                if let error = tester.speakerDiarizationError {
-                    Label(error, systemImage: "person.2.badge.xmark")
-                        .font(.caption)
-                        .foregroundStyle(.orange)
-                }
+            if tester.transcript.isEmpty {
+                Text(tester.isListening
+                     ? "Listening… start speaking."
+                     : "Tap Start Listening and speak. Your words will appear here in real time.")
+                    .foregroundStyle(.secondary)
+            } else {
+                Text(tester.transcript)
+                    .textSelection(.enabled)
             }
         }
         .frame(minHeight: 150, alignment: .top)
@@ -440,7 +516,7 @@ private struct ConfigurationPanel: View {
             Toggle(isOn: $tester.speakerLabelsEnabled) {
                 VStack(alignment: .leading, spacing: 2) {
                     Text("Label who is speaking")
-                    Text("Adds “Speaker 1”, “Speaker 2”, and so on to the transcript, entirely on device.")
+                    Text("Adds “Speaker 1”, “Speaker 2”, and so on. Transcription always uses Apple's Speech framework; this only turns speaker labels on or off.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
