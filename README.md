@@ -17,13 +17,32 @@ on-device Foundation Model.
 
 ## Requirements
 
-- Xcode 27 or Swift Playgrounds on macOS 27.2+, or an iOS 27.3+ device.
+- Xcode 27.3 or later.
+- iOS 27.3+ (iPhone or iPad) or macOS 27.2+.
 - Apple Intelligence enabled for model responses (live transcription works without it).
 - Microphone and Speech Recognition permissions.
 
 The first launch may download the speech transcription model. `Foundation Model
 Tester` requests microphone and speech recognition access when you tap **Start
 Listening**.
+
+## Run on iOS
+
+The target is already configured for iPhone and iPad (`SUPPORTED_PLATFORMS`
+includes `iphoneos` and `iphonesimulator`).
+
+1. Open `slot_test_1.xcodeproj` in Xcode.
+2. Select the `slot_test_1` scheme.
+3. Pick an iPhone or iPad simulator, then press **Run**.
+4. To run on a physical device, select your iPhone/iPad and choose your
+   development team under **Signing & Capabilities** (Automatic signing works
+   for a free Apple ID).
+
+The simulator uses your Mac's microphone. On first run, allow Microphone and
+Speech Recognition access.
+
+The app icon in `Assets.xcassets/AppIcon.appiconset` supplies the iOS 1024×1024
+icon plus the macOS sizes.
 
 ## Project notes
 
