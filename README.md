@@ -13,7 +13,8 @@ Apple's on-device Foundation Model.
 - Lets you tune LLM speed with a reasoning level and an artificial streaming lag.
 - Optionally keeps earlier transcripts and model replies in conversation context.
 - Streams the model's response back to the screen token by token.
-- Provides "Send Now", "Clear", copy buttons, and editable system instructions.
+- Provides "Send Now", "Clear", copy buttons, and editable system instructions
+  that persist across launches.
 
 Audio is never sent off the device. The transcript is passed only to Apple's
 on-device Foundation Model.

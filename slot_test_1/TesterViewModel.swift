@@ -7,13 +7,28 @@ final class TesterViewModel {
     let transcriber = LiveSpeechTranscriber()
     let model = FoundationModelClient()
 
-    var instructions = """
+    private static let instructionsDefaultsKey = "systemInstructions"
+
+    private static let defaultInstructions = """
     You are a helpful assistant running inside a live speech transcription tester. \
     The user's message is a speech transcript and may contain recognition errors. \
     Reply concisely in plain text, in the same language as the transcript.
     """
+
+    /// Persisted in `UserDefaults` so custom instructions survive relaunches.
+    var instructions: String {
+        didSet {
+            UserDefaults.standard.set(instructions, forKey: Self.instructionsDefaultsKey)
+        }
+    }
+
     var autoSendEnabled = true
     var cadenceSeconds: Double = 5
+
+    init() {
+        instructions = UserDefaults.standard.string(forKey: Self.instructionsDefaultsKey)
+            ?? Self.defaultInstructions
+    }
 
     /// Fast speech results appear sooner but may be less accurate. Applies
     /// the next time transcription starts.
@@ -72,6 +87,12 @@ final class TesterViewModel {
 
     var isResponding: Bool {
         model.isResponding
+    }
+
+    /// Whether the current model can honor a reasoning level. The on-device
+    /// model cannot, so the reasoning level setting is disabled in that case.
+    var modelSupportsReasoning: Bool {
+        model.supportsReasoning
     }
 
     var errorMessage: String? {

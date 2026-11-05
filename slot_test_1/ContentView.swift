@@ -396,8 +396,11 @@ private struct ConfigurationPanel: View {
             }
             .pickerStyle(.segmented)
             .labelsHidden()
+            .disabled(!tester.modelSupportsReasoning)
 
-            Text(tester.reasoningLevel.summary)
+            Text(tester.modelSupportsReasoning
+                 ? tester.reasoningLevel.summary
+                 : "The on-device model doesn't support reasoning levels, so this setting is ignored.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
 

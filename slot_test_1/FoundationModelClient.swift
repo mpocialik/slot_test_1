@@ -54,6 +54,10 @@ final class FoundationModelClient {
     private(set) var errorMessage: String?
     private(set) var availability = SystemLanguageModel.default.availability
 
+    /// Whether the selected model supports reasoning levels. The on-device
+    /// model does not; reasoning is currently a Private Cloud Compute feature.
+    private(set) var supportsReasoning = SystemLanguageModel.default.capabilities.contains(.reasoning)
+
     /// Reasoning depth used for the next request.
     var reasoningLevel: ModelReasoningLevel = .moderate
 
@@ -93,7 +97,9 @@ final class FoundationModelClient {
     }
 
     func refreshAvailability() {
-        availability = SystemLanguageModel.default.availability
+        let model = SystemLanguageModel.default
+        availability = model.availability
+        supportsReasoning = model.capabilities.contains(.reasoning)
     }
 
     func send(_ transcript: String, instructions: String) {
@@ -143,7 +149,14 @@ final class FoundationModelClient {
                 )
 
                 do {
-                    let contextOptions = ContextOptions(reasoningLevel: self.reasoningLevel.contextLevel)
+                    // Only request a reasoning level when the model advertises
+                    // the `.reasoning` capability. Passing one to the on-device
+                    // model throws `unsupportedCapability`.
+                    let contextOptions = ContextOptions(
+                        reasoningLevel: self.supportsReasoning
+                            ? self.reasoningLevel.contextLevel
+                            : nil
+                    )
                     let stream = request.session.streamResponse(
                         to: request.prompt,
                         contextOptions: contextOptions
