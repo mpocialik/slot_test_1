@@ -11,6 +11,7 @@ Apple's on-device Foundation Model.
 - Lets you tune transcription speed with fast speech results and an artificial display lag.
 - Sends the newest transcript to a `LanguageModelSession` every 5 seconds (configurable from 1–15 seconds).
 - Lets you tune LLM speed with a reasoning level and an artificial streaming lag.
+- Optionally keeps earlier transcripts and model replies in conversation context.
 - Streams the model's response back to the screen token by token.
 - Provides "Send Now", "Clear", copy buttons, and editable system instructions.
 

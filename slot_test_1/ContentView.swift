@@ -330,11 +330,13 @@ private struct ConfigurationPanel: View {
                     Divider()
                     llmSpeedSection
                     Divider()
+                    conversationSection
+                    Divider()
                     instructionsSection
                 }
                 .padding(.top, 10)
             } label: {
-                Text("Transcription speed, LLM speed, and instructions")
+                Text("Speed, memory, and model instructions")
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
             }
@@ -435,6 +437,26 @@ private struct ConfigurationPanel: View {
             }
             .disabled(!tester.autoSendEnabled)
             .opacity(tester.autoSendEnabled ? 1 : 0.5)
+        }
+    }
+
+    private var conversationSection: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Label("Conversation", systemImage: "bubble.left.and.bubble.right")
+                .font(.subheadline.weight(.semibold))
+
+            Toggle(isOn: $tester.conversationMemoryEnabled) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Conversation memory")
+                    Text("Keeps earlier transcripts and model replies in context. Off sends each request independently.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+
+            Text("Toggling memory or pressing Clear starts a fresh conversation.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
         }
     }
 

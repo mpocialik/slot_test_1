@@ -40,6 +40,17 @@ final class TesterViewModel {
         set { model.streamUpdateInterval = max(0, newValue / 1_000) }
     }
 
+    /// When enabled, the model keeps earlier transcripts and replies in context.
+    /// Turning memory off or on starts a fresh conversation.
+    var conversationMemoryEnabled: Bool {
+        get { model.conversationMemoryEnabled }
+        set {
+            guard newValue != model.conversationMemoryEnabled else { return }
+            model.conversationMemoryEnabled = newValue
+            model.resetConversation()
+        }
+    }
+
     private var cadenceTask: Task<Void, Never>?
     private var lastSentTranscript = ""
 
@@ -138,14 +149,6 @@ final class TesterViewModel {
         guard force || !model.isResponding else { return }
 
         lastSentTranscript = text
-        model.send(promptText(from: text), instructions: instructions)
-    }
-
-    /// Keeps the prompt inside the on-device model's context window during
-    /// long listening sessions. The full transcript stays visible on screen.
-    private func promptText(from text: String) -> String {
-        let limit = 6_000
-        guard text.count > limit else { return text }
-        return "…" + String(text.suffix(limit))
+        model.send(text, instructions: instructions)
     }
 }

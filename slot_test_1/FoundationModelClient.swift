@@ -61,8 +61,16 @@ final class FoundationModelClient {
     /// tokens as fast as the model produces them.
     var streamUpdateInterval: TimeInterval = 0
 
+    /// When enabled, requests share one conversation session so the model can
+    /// refer to earlier transcripts and replies.
+    var conversationMemoryEnabled = false
+
     private var responseTask: Task<Void, Never>?
     private var activeRequestID = UUID()
+
+    private var memorySession: LanguageModelSession?
+    private var memoryInstructions = ""
+    private var memoryLastTranscript = ""
 
     var isAvailable: Bool {
         if case .available = availability { return true }
@@ -88,9 +96,9 @@ final class FoundationModelClient {
         availability = SystemLanguageModel.default.availability
     }
 
-    func send(_ prompt: String, instructions: String) {
-        let prompt = prompt.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !prompt.isEmpty else { return }
+    func send(_ transcript: String, instructions: String) {
+        let transcript = transcript.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !transcript.isEmpty else { return }
 
         refreshAvailability()
         guard isAvailable else {
@@ -98,7 +106,16 @@ final class FoundationModelClient {
             return
         }
 
+        let memoryEnabled = conversationMemoryEnabled
+        let interruptedResponse = isResponding
         responseTask?.cancel()
+
+        // An interrupted turn may have been partially recorded in the shared
+        // session, so start the new request with a clean conversation.
+        if interruptedResponse, memoryEnabled {
+            resetConversation()
+        }
+
         let requestID = UUID()
         activeRequestID = requestID
 
@@ -116,24 +133,57 @@ final class FoundationModelClient {
                 }
             }
 
-            do {
-                let session = self.makeSession(instructions: instructions)
-                let contextOptions = ContextOptions(reasoningLevel: self.reasoningLevel.contextLevel)
-                let stream = session.streamResponse(to: prompt, contextOptions: contextOptions)
+            var didRetryAfterContextOverflow = false
 
-                var isFirstUpdate = true
-                for try await snapshot in stream {
-                    if !isFirstUpdate, self.streamUpdateInterval > 0 {
-                        try await Task.sleep(for: .seconds(self.streamUpdateInterval))
+            while !Task.isCancelled, self.activeRequestID == requestID {
+                let request = self.prepareRequest(
+                    transcript: transcript,
+                    instructions: instructions,
+                    memoryEnabled: memoryEnabled
+                )
+
+                do {
+                    let contextOptions = ContextOptions(reasoningLevel: self.reasoningLevel.contextLevel)
+                    let stream = request.session.streamResponse(
+                        to: request.prompt,
+                        contextOptions: contextOptions
+                    )
+
+                    var isFirstUpdate = true
+                    for try await snapshot in stream {
+                        if !isFirstUpdate, self.streamUpdateInterval > 0 {
+                            try await Task.sleep(for: .seconds(self.streamUpdateInterval))
+                        }
+                        isFirstUpdate = false
+
+                        guard !Task.isCancelled, self.activeRequestID == requestID else { return }
+                        self.output = snapshot.content
                     }
-                    isFirstUpdate = false
+
+                    if memoryEnabled, self.conversationMemoryEnabled {
+                        self.memoryLastTranscript = transcript
+                    }
+                    return
+                } catch {
+                    if memoryEnabled,
+                       let languageModelError = error as? LanguageModelError,
+                       case .contextSizeExceeded = languageModelError,
+                       !didRetryAfterContextOverflow {
+                        // Drop the conversation and retry once with a fresh
+                        // session containing only the current transcript.
+                        didRetryAfterContextOverflow = true
+                        self.resetConversation()
+                        self.output = ""
+                        continue
+                    }
 
                     guard !Task.isCancelled, self.activeRequestID == requestID else { return }
-                    self.output = snapshot.content
+                    self.errorMessage = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+                    if memoryEnabled {
+                        self.resetConversation()
+                    }
+                    return
                 }
-            } catch {
-                guard !Task.isCancelled, self.activeRequestID == requestID else { return }
-                self.errorMessage = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
             }
         }
     }
@@ -145,10 +195,68 @@ final class FoundationModelClient {
         isResponding = false
     }
 
+    /// Forgets any retained conversation so the next request starts fresh.
+    func resetConversation() {
+        memorySession = nil
+        memoryInstructions = ""
+        memoryLastTranscript = ""
+    }
+
     func clear() {
         cancel()
+        resetConversation()
         output = ""
         errorMessage = nil
+    }
+
+    private func prepareRequest(
+        transcript: String,
+        instructions: String,
+        memoryEnabled: Bool
+    ) -> (session: LanguageModelSession, prompt: String) {
+        guard memoryEnabled else {
+            resetConversation()
+            return (makeSession(instructions: instructions), promptText(from: transcript))
+        }
+
+        if let session = memorySession,
+           memoryInstructions == instructions {
+            let commonLength = commonPrefixLength(memoryLastTranscript, transcript)
+
+            if commonLength > 0 || memoryLastTranscript.isEmpty {
+                let delta = String(transcript.dropFirst(commonLength))
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+
+                if !delta.isEmpty {
+                    // Send only what changed since the previous turn. Earlier
+                    // speech and replies are already in the shared session.
+                    return (session, promptText(from: delta))
+                }
+
+                // Nothing new was said (for example, "Send Now"). Resend the
+                // latest transcript while keeping the conversation intact.
+                return (session, promptText(from: transcript))
+            }
+        }
+
+        resetConversation()
+        let session = makeSession(instructions: instructions)
+        memorySession = session
+        memoryInstructions = instructions
+        return (session, promptText(from: transcript))
+    }
+
+    /// Finds where the live transcript diverges from what the model last saw.
+    /// Volatile speech results can be revised when they become final, so this
+    /// is not always a simple prefix append.
+    private func commonPrefixLength(_ old: String, _ new: String) -> Int {
+        zip(old, new).prefix { $0 == $1 }.count
+    }
+
+    private func promptText(from text: String) -> String {
+        let limit = 6_000
+        guard text.count > limit else { return text }
+        return "…" + String(text.suffix(limit))
     }
 
     private func makeSession(instructions: String) -> LanguageModelSession {
