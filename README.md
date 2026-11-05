@@ -35,6 +35,11 @@ Sortformer is optimized for conversations and supports up to four speakers.
 It runs through Core ML on the Neural Engine where available. Diarization is
 best-effort: if the model cannot load, transcription continues without labels.
 
+The default **Exactly 2** mode ranks the diarizer's four slots by total speech
+per session, keeps the top two, and folds stray slots into the nearest of
+those two. Switch to **Auto (up to 4)** in tuning if you want the native
+four-slot behavior.
+
 Transcription is always handled by Apple's `SpeechAnalyzer` /
 `SpeechTranscriber`. FluidAudio is used only to compute speaker labels.
 Turning **Speaker labels** off hides the labels immediately and starts no
@@ -47,6 +52,10 @@ cached in memory so a later restart is fast.
 **Configuration → Diarization tuning** exposes the knobs that are useful for
 experimenting without touching code:
 
+- **Speaker count** — Exactly 2 (default) or Auto (up to 4). Exactly 2 keeps
+  the two speaker slots with the most speech in each session, merges stray
+  slots into the nearest of those two, and reuses Speaker 1/2 across sessions
+  so the whole transcript stays at two labels.
 - **Model preset** — Fast, Balanced (default), or Efficient. Changing the
   preset loads the matching model bundle on the next session (downloading it
   the first time).

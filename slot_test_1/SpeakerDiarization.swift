@@ -52,10 +52,44 @@ nonisolated enum DiarizationModelPreset: String, CaseIterable, Identifiable, Cod
     }
 }
 
+/// How many speaker labels the transcript is allowed to show.
+nonisolated enum DiarizationSpeakerMode: String, CaseIterable, Identifiable, Codable, Sendable {
+    case exactlyTwo
+    case automatic
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .exactlyTwo: return "Exactly 2"
+        case .automatic: return "Auto (up to 4)"
+        }
+    }
+
+    var summary: String {
+        switch self {
+        case .exactlyTwo:
+            return "Keeps the two speakers with the most speech in each session and merges stray slots into them."
+        case .automatic:
+            return "Keeps Sortformer's native four speaker slots."
+        }
+    }
+
+    var maxSpeakers: Int {
+        switch self {
+        case .exactlyTwo: return 2
+        case .automatic: return 4
+        }
+    }
+}
+
 /// User-tunable diarization behavior. The model preset and the timeline
 /// thresholds are read when a listening session starts.
 nonisolated struct DiarizationTuning: Codable, Equatable, Sendable {
     var preset: DiarizationModelPreset = .balanced
+
+    /// Constrains how many distinct speakers appear in the transcript.
+    var speakerMode: DiarizationSpeakerMode = .exactlyTwo
 
     /// 0 = conservative, 1 = eager. Drives both onset and offset thresholds.
     var sensitivity: Double = 0.5
@@ -86,6 +120,44 @@ nonisolated struct DiarizationTuning: Codable, Equatable, Sendable {
         return config
     }
 
+    var maxSpeakers: Int {
+        speakerMode.maxSpeakers
+    }
+}
+
+nonisolated extension DiarizationTuning {
+    private enum CodingKeys: String, CodingKey {
+        case preset
+        case speakerMode
+        case sensitivity
+        case minGapSeconds
+        case minSegmentSeconds
+        case labelGracePeriod
+        case debugLogging
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.init()
+        preset = try container.decodeIfPresent(DiarizationModelPreset.self, forKey: .preset) ?? preset
+        speakerMode = try container.decodeIfPresent(DiarizationSpeakerMode.self, forKey: .speakerMode) ?? speakerMode
+        sensitivity = try container.decodeIfPresent(Double.self, forKey: .sensitivity) ?? sensitivity
+        minGapSeconds = try container.decodeIfPresent(Double.self, forKey: .minGapSeconds) ?? minGapSeconds
+        minSegmentSeconds = try container.decodeIfPresent(Double.self, forKey: .minSegmentSeconds) ?? minSegmentSeconds
+        labelGracePeriod = try container.decodeIfPresent(Double.self, forKey: .labelGracePeriod) ?? labelGracePeriod
+        debugLogging = try container.decodeIfPresent(Bool.self, forKey: .debugLogging) ?? debugLogging
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(preset, forKey: .preset)
+        try container.encode(speakerMode, forKey: .speakerMode)
+        try container.encode(sensitivity, forKey: .sensitivity)
+        try container.encode(minGapSeconds, forKey: .minGapSeconds)
+        try container.encode(minSegmentSeconds, forKey: .minSegmentSeconds)
+        try container.encode(labelGracePeriod, forKey: .labelGracePeriod)
+        try container.encode(debugLogging, forKey: .debugLogging)
+    }
 }
 
 /// Captures microphone audio and resamples it to the 16 kHz mono Float32
@@ -386,6 +458,8 @@ final class SpeakerDiarizationService {
     @ObservationIgnored private var lastSpeakerKey: Int?
     @ObservationIgnored private var loadedPreset: DiarizationModelPreset?
     @ObservationIgnored private var sessionTuning: DiarizationTuning = .default
+    @ObservationIgnored private var sessionSpeakerNumbers: [Int: Int] = [:]
+    @ObservationIgnored private var sessionNumberBase = 0
 
     /// Called whenever speaker segments change so the transcript can be
     /// re-rendered with updated labels.
@@ -403,6 +477,8 @@ final class SpeakerDiarizationService {
     func clearLabels() {
         segments = []
         speakerNumbers = [:]
+        sessionSpeakerNumbers = [:]
+        sessionNumberBase = 0
         lastSpeakerKey = nil
         onSegmentsChanged?()
     }
@@ -425,6 +501,13 @@ final class SpeakerDiarizationService {
         // Keep earlier segments and labels so transcript turns from previous
         // listening sessions stay attributed. New sessions use a fresh key
         // range and continue the speaker numbering.
+        speakerNumbers.merge(sessionSpeakerNumbers) { _, new in new }
+        sessionSpeakerNumbers = [:]
+        // In Exactly 2 mode, reuse Speaker 1/2 across sessions so the whole
+        // transcript is limited to two labels. Auto mode continues numbering.
+        sessionNumberBase = tuning.maxSpeakers <= 2
+            ? 0
+            : (speakerNumbers.values.max() ?? 0)
         sessionKeyBase = sessionGeneration * 100
         lastSpeakerKey = nil
         errorMessage = nil
@@ -664,7 +747,7 @@ final class SpeakerDiarizationService {
     }
 
     func speakerNumber(for slot: Int) -> Int? {
-        speakerNumbers[slot]
+        sessionSpeakerNumbers[slot] ?? speakerNumbers[slot]
     }
 
     private func startProcessingLoop(
@@ -724,29 +807,104 @@ final class SpeakerDiarizationService {
             )
         }
 
-        var numbers = speakerNumbers
-        for segment in shifted where numbers[segment.speakerKey] == nil {
-            numbers[segment.speakerKey] = (numbers.values.max() ?? 0) + 1
+        let capped = capSpeakers(in: shifted)
+        let orderedKeys = orderedSpeakerKeys(in: capped)
+        var numbers: [Int: Int] = [:]
+        for (index, key) in orderedKeys.enumerated() {
+            numbers[key] = sessionNumberBase + index + 1
         }
 
         // Keep segments from earlier sessions, replace only this session's
         // snapshot, and sort the combined timeline.
         let previous = segments.filter { $0.speakerKey < sessionKeyBase }
-        let merged = (previous + shifted).sorted {
+        let merged = (previous + capped).sorted {
             ($0.startTime, $0.endTime, $0.speakerKey)
                 < ($1.startTime, $1.endTime, $1.speakerKey)
         }
 
-        let changed = merged != segments || numbers != speakerNumbers
+        let changed = merged != segments || numbers != sessionSpeakerNumbers
         segments = merged
-        speakerNumbers = numbers
-        if let last = shifted.last {
+        sessionSpeakerNumbers = numbers
+        if let last = capped.last {
             lastSpeakerKey = last.speakerKey
         }
 
         if changed {
             onSegmentsChanged?()
         }
+    }
+
+    /// Keeps only the `maxSpeakers` dominant speaker slots and maps any stray
+    /// slot to the canonical speaker whose segment is nearest in time.
+    private func capSpeakers(in segments: [SpeakerSegment]) -> [SpeakerSegment] {
+        let maxSpeakers = sessionTuning.maxSpeakers
+        guard maxSpeakers > 0 else { return segments }
+
+        let keys = Set(segments.map(\.speakerKey))
+        guard keys.count > maxSpeakers else { return segments }
+
+        var durations: [Int: TimeInterval] = [:]
+        var firstStart: [Int: TimeInterval] = [:]
+        for segment in segments {
+            durations[segment.speakerKey, default: 0] += max(0, segment.endTime - segment.startTime)
+            firstStart[segment.speakerKey] = min(
+                firstStart[segment.speakerKey] ?? .greatestFiniteMagnitude,
+                segment.startTime
+            )
+        }
+
+        let ranked = keys.sorted { lhs, rhs in
+            let left = durations[lhs] ?? 0
+            let right = durations[rhs] ?? 0
+            if left != right { return left > right }
+            return (firstStart[lhs] ?? 0) < (firstStart[rhs] ?? 0)
+        }
+        let canonicalKeys = Set(ranked.prefix(maxSpeakers))
+        let canonicalSegments = segments.filter { canonicalKeys.contains($0.speakerKey) }
+        guard !canonicalSegments.isEmpty else { return segments }
+
+        return segments.map { segment in
+            guard !canonicalKeys.contains(segment.speakerKey) else { return segment }
+            return SpeakerSegment(
+                speakerKey: nearestSpeakerKey(for: segment, in: canonicalSegments),
+                startTime: segment.startTime,
+                endTime: segment.endTime,
+                isFinalized: segment.isFinalized
+            )
+        }
+    }
+
+    private func nearestSpeakerKey(
+        for segment: SpeakerSegment,
+        in candidates: [SpeakerSegment]
+    ) -> Int {
+        let midpoint = (segment.startTime + segment.endTime) / 2
+        var bestKey = candidates[0].speakerKey
+        var bestScore = -Double.greatestFiniteMagnitude
+
+        for candidate in candidates {
+            let overlap = min(segment.endTime, candidate.endTime)
+                - max(segment.startTime, candidate.startTime)
+            let score = overlap > 0
+                ? 1_000 + overlap
+                : -gap(from: candidate, to: midpoint)
+
+            if score > bestScore {
+                bestScore = score
+                bestKey = candidate.speakerKey
+            }
+        }
+        return bestKey
+    }
+
+    /// Distinct speaker keys in first-appearance order.
+    private func orderedSpeakerKeys(in segments: [SpeakerSegment]) -> [Int] {
+        var seen = Set<Int>()
+        return segments
+            .sorted { ($0.startTime, $0.endTime) < ($1.startTime, $1.endTime) }
+            .compactMap { segment in
+                seen.insert(segment.speakerKey).inserted ? segment.speakerKey : nil
+            }
     }
 
     private func record(_ error: Error) {

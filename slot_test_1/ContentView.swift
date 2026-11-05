@@ -543,7 +543,7 @@ private struct ConfigurationPanel: View {
                     .foregroundStyle(.orange)
             }
 
-            Text("Up to four speakers. The first session downloads roughly 100–250 MB of speaker models. Turning labels off hides them immediately; diarization starts with the next listening session.")
+            Text("Exactly 2 speakers by default; Auto supports up to four. The first session downloads roughly 100–250 MB of speaker models. Turning labels off hides them immediately; diarization starts with the next listening session.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
         }
@@ -555,6 +555,26 @@ private struct ConfigurationPanel: View {
                 Text("Applied when you start listening. These settings only affect speaker labels; Apple Speech still handles transcription.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
+
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("Speaker count")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+
+                    Picker("Speaker count", selection: $tester.diarizationTuning.speakerMode) {
+                        ForEach(DiarizationSpeakerMode.allCases) { mode in
+                            Text(mode.title).tag(mode)
+                        }
+                    }
+                    .pickerStyle(.segmented)
+                    .labelsHidden()
+
+                    Text(tester.diarizationTuning.speakerMode.summary)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+
+                Divider()
 
                 VStack(alignment: .leading, spacing: 8) {
                     Text("Model preset")
