@@ -73,6 +73,20 @@ Tuning values persist in `UserDefaults` and apply when you next start
 listening. Timeline-only changes reuse the loaded model; changing the preset
 loads a different model.
 
+## System instructions
+
+The built-in system prompt lives in
+[`slot_test_1/DefaultSystemPrompt.md`](slot_test_1/DefaultSystemPrompt.md) as
+plain Markdown, so it can be edited in any text editor without opening Xcode.
+The app reads the file from its bundle at launch, so edits take effect on the
+next build and run.
+
+Text typed into **Configuration → System instructions** is saved in
+`UserDefaults` and overrides the file. **Reset to default** discards that
+custom text and goes back to the version currently in the bundle. If the file
+is missing or empty, the app falls back to an inline copy of the prompt in
+`TesterViewModel.swift`.
+
 ## Requirements
 
 - Xcode 27.3 or later.

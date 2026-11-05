@@ -802,8 +802,19 @@ private struct ConfigurationPanel: View {
 
     private var instructionsSection: some View {
         VStack(alignment: .leading, spacing: 6) {
-            Text("System instructions")
-                .font(.subheadline.weight(.semibold))
+            HStack(spacing: 8) {
+                Text("System instructions")
+                    .font(.subheadline.weight(.semibold))
+
+                Spacer()
+
+                Button("Reset to default") {
+                    tester.resetInstructions()
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+                .disabled(tester.instructions == TesterViewModel.defaultInstructions)
+            }
 
             TextEditor(text: $tester.instructions)
                 .font(.callout)
@@ -814,6 +825,10 @@ private struct ConfigurationPanel: View {
                     Color.primary.opacity(0.05),
                     in: RoundedRectangle(cornerRadius: 10, style: .continuous)
                 )
+
+            Text("The built-in default lives in DefaultSystemPrompt.md in the app folder. Edit it in any text editor and rebuild.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
         }
     }
 }

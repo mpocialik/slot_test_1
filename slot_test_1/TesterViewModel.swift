@@ -11,7 +11,38 @@ final class TesterViewModel {
     private static let speakerLabelsDefaultsKey = "speakerLabelsEnabled"
     private static let diarizationTuningDefaultsKey = "diarizationTuning"
 
-    private static let defaultInstructions = """
+    /// Name of the bundled file holding the built-in prompt. It is a plain
+    /// `.md` file so it can be edited in any text editor without opening Xcode.
+    private static let defaultInstructionsResource = "DefaultSystemPrompt"
+
+    /// Live copy of the built-in prompt, read from `DefaultSystemPrompt.md`
+    /// in the app bundle. Edit that file and rebuild to change the default.
+    ///
+    /// `inlineDefaultInstructions` is only used if the resource is missing or
+    /// empty so the app still runs with a sane prompt.
+    static let defaultInstructions: String = {
+        guard let url = Bundle.main.url(
+            forResource: defaultInstructionsResource,
+            withExtension: "md"
+        ) else {
+            #if DEBUG
+            print("DefaultSystemPrompt.md is missing from the app bundle; using the inline fallback prompt.")
+            #endif
+            return inlineDefaultInstructions
+        }
+
+        guard let text = try? String(contentsOf: url, encoding: .utf8) else {
+            #if DEBUG
+            print("DefaultSystemPrompt.md could not be read; using the inline fallback prompt.")
+            #endif
+            return inlineDefaultInstructions
+        }
+
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? inlineDefaultInstructions : trimmed
+    }()
+
+    private static let inlineDefaultInstructions = """
     You are a helpful assistant running inside a live speech transcription tester. \
     The user's message is a speech transcript and may contain recognition errors. \
     The transcript may label turns as "Speaker 1:", "Speaker 2:", and so on. \
@@ -19,9 +50,15 @@ final class TesterViewModel {
     """
 
     /// Persisted in `UserDefaults` so custom instructions survive relaunches.
+    /// The saved value is dropped when the text matches the built-in prompt so
+    /// later edits to `DefaultSystemPrompt.md` are picked up after a rebuild.
     var instructions: String {
         didSet {
-            UserDefaults.standard.set(instructions, forKey: Self.instructionsDefaultsKey)
+            if instructions == Self.defaultInstructions {
+                UserDefaults.standard.removeObject(forKey: Self.instructionsDefaultsKey)
+            } else {
+                UserDefaults.standard.set(instructions, forKey: Self.instructionsDefaultsKey)
+            }
         }
     }
 
@@ -235,6 +272,12 @@ final class TesterViewModel {
 
     func resetDiarizationTuning() {
         diarizationTuning = .default
+    }
+
+    /// Restores the built-in prompt from `DefaultSystemPrompt.md`, discarding
+    /// any custom text saved in `UserDefaults`.
+    func resetInstructions() {
+        instructions = Self.defaultInstructions
     }
 
     func clearSpeakerModelCache() async {

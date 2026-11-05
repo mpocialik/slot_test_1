@@ -24,6 +24,10 @@ speaker diarization via FluidAudio.
 - `ContentView.swift` — all UI in one file.
 - `TesterViewModel.swift` — `@MainActor @Observable` orchestrator: owns the
   transcriber and model client, runs the auto-send timer loop.
+- `DefaultSystemPrompt.md` — the built-in system prompt. Loaded from the app
+  bundle at launch (`TesterViewModel.defaultInstructions`), so edit this file
+  instead of Swift source to change the default. An inline copy in
+  `TesterViewModel.swift` is only the fallback if the resource is missing.
 - `LiveSpeechTranscriber.swift` — `AVAudioEngine` mic capture + live
   transcription; also owns the diarization capture.
 - `SpeakerDiarization.swift` — FluidAudio Sortformer diarization
@@ -56,7 +60,10 @@ actor, which forwards samples to the engine actor for inference.
   Reasoning levels are ignored by the on-device model (`SystemLanguageModel`
   lacks the `.reasoning` capability) — see `FoundationModelClient.swift`.
 - Persisted settings use `UserDefaults` keys `systemInstructions`,
-  `speakerLabelsEnabled`, and `diarizationTuning` (JSON).
+  `speakerLabelsEnabled`, and `diarizationTuning` (JSON). `systemInstructions`
+  is only written when the text differs from the bundled default, so a rebuild
+  after editing `DefaultSystemPrompt.md` is picked up unless the user typed a
+  custom prompt (**Reset to default** clears it).
 - Signing is already configured: automatic, `DEVELOPMENT_TEAM = XHV2GLB6KY`,
   bundle id `com.michaelpocialikpersonalteam.slottest1`.
 
