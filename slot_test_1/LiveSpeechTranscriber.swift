@@ -15,6 +15,14 @@ final class LiveSpeechTranscriber {
     private(set) var errorMessage: String?
     private(set) var needsPermissionSettings = false
 
+    /// When enabled, asks the speech model for faster (but potentially less
+    /// accurate) results. Takes effect the next time transcription starts.
+    var usesFastResults = false
+
+    /// Artificial delay applied before new transcript text is shown, in
+    /// seconds. `0` publishes results in real time.
+    private(set) var transcriptUpdateInterval: TimeInterval = 0
+
     private var sessionGeneration = 0
 
     private let audioEngine = AVAudioEngine()
@@ -29,6 +37,9 @@ final class LiveSpeechTranscriber {
     private var finalizedTranscript = ""
     private var volatileTranscript = ""
 
+    private var displayTask: Task<Void, Never>?
+    private var lastDisplayUpdate = Date.distantPast
+
     // MARK: - Public controls
 
     func start() async {
@@ -40,6 +51,10 @@ final class LiveSpeechTranscriber {
         errorMessage = nil
         needsPermissionSettings = false
         statusMessage = "Requesting permissions…"
+
+        displayTask?.cancel()
+        displayTask = nil
+        lastDisplayUpdate = .distantPast
 
         sessionGeneration += 1
         let generation = sessionGeneration
@@ -80,9 +95,19 @@ final class LiveSpeechTranscriber {
     }
 
     func clear() {
+        displayTask?.cancel()
+        displayTask = nil
         transcript = ""
         finalizedTranscript = ""
         volatileTranscript = ""
+        lastDisplayUpdate = .distantPast
+    }
+
+    /// Updates the artificial display lag. Cancels any pending update and
+    /// publishes the current transcript immediately.
+    func setTranscriptUpdateInterval(_ interval: TimeInterval) {
+        transcriptUpdateInterval = max(0, interval)
+        flushTranscriptDisplay()
     }
 
     private func commitVolatileTranscript() {
@@ -90,7 +115,7 @@ final class LiveSpeechTranscriber {
             finalizedTranscript += volatileTranscript
             volatileTranscript = ""
         }
-        transcript = finalizedTranscript
+        flushTranscriptDisplay()
     }
 
     // MARK: - Permissions
@@ -149,10 +174,15 @@ final class LiveSpeechTranscriber {
 
         statusMessage = "Preparing speech model…"
 
+        var reportingOptions: Set<SpeechTranscriber.ReportingOption> = [.volatileResults]
+        if usesFastResults {
+            reportingOptions.insert(.fastResults)
+        }
+
         let transcriber = SpeechTranscriber(
             locale: locale,
             transcriptionOptions: [],
-            reportingOptions: [.volatileResults],
+            reportingOptions: reportingOptions,
             attributeOptions: []
         )
         self.transcriber = transcriber
@@ -218,6 +248,44 @@ final class LiveSpeechTranscriber {
             volatileTranscript = segment
         }
 
+        publishTranscript()
+    }
+
+    /// Throttles visible transcript updates so the display can be slowed down
+    /// intentionally while testing. The transcript state itself is always
+    /// current; only the published `transcript` is delayed.
+    private func publishTranscript() {
+        let interval = transcriptUpdateInterval
+        guard interval > 0 else {
+            flushTranscriptDisplay()
+            return
+        }
+
+        let elapsed = Date.now.timeIntervalSince(lastDisplayUpdate)
+        if elapsed >= interval {
+            flushTranscriptDisplay()
+            return
+        }
+
+        guard displayTask == nil else { return }
+
+        let delay = interval - elapsed
+        displayTask = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(delay))
+            guard let self, !Task.isCancelled else { return }
+            self.displayTask = nil
+            self.showCurrentTranscript()
+        }
+    }
+
+    private func flushTranscriptDisplay() {
+        displayTask?.cancel()
+        displayTask = nil
+        showCurrentTranscript()
+    }
+
+    private func showCurrentTranscript() {
+        lastDisplayUpdate = .now
         transcript = finalizedTranscript + volatileTranscript
     }
 
@@ -266,6 +334,9 @@ final class LiveSpeechTranscriber {
 
     private func tearDown() async {
         isListening = false
+
+        displayTask?.cancel()
+        displayTask = nil
 
         analysisTask?.cancel()
         analysisTask = nil

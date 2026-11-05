@@ -325,50 +325,133 @@ private struct ConfigurationPanel: View {
     var body: some View {
         PanelCard(title: "Configuration", systemImage: "slider.horizontal.3") {
             DisclosureGroup(isExpanded: $isExpanded) {
-                VStack(alignment: .leading, spacing: 18) {
-                    Toggle(isOn: $tester.autoSendEnabled) {
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text("Send automatically")
-                            Text("Sends the newest transcript to the model on a timer.")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                        }
-                    }
-
-                    HStack(spacing: 12) {
-                        Text("Every")
-                            .frame(width: 44, alignment: .leading)
-
-                        Slider(value: $tester.cadenceSeconds, in: 1...15, step: 1)
-
-                        Text("\(Int(tester.cadenceSeconds)) s")
-                            .monospacedDigit()
-                            .frame(width: 38, alignment: .trailing)
-                    }
-                    .disabled(!tester.autoSendEnabled)
-                    .opacity(tester.autoSendEnabled ? 1 : 0.5)
-
-                    VStack(alignment: .leading, spacing: 6) {
-                        Text("System instructions")
-                            .font(.subheadline.weight(.semibold))
-
-                        TextEditor(text: $tester.instructions)
-                            .font(.callout)
-                            .frame(height: 110)
-                            .scrollContentBackground(.hidden)
-                            .padding(8)
-                            .background(
-                                Color.primary.opacity(0.05),
-                                in: RoundedRectangle(cornerRadius: 10, style: .continuous)
-                            )
-                    }
+                VStack(alignment: .leading, spacing: 20) {
+                    transcriptionSpeedSection
+                    Divider()
+                    llmSpeedSection
+                    Divider()
+                    instructionsSection
                 }
                 .padding(.top, 10)
             } label: {
-                Text("Timer, auto-send, and model instructions")
+                Text("Transcription speed, LLM speed, and instructions")
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
             }
+        }
+    }
+
+    private var transcriptionSpeedSection: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Label("Transcription speed", systemImage: "waveform")
+                .font(.subheadline.weight(.semibold))
+
+            Text("Speech results")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+
+            Picker("Speech results", selection: $tester.fastTranscription) {
+                Text("Fast").tag(true)
+                Text("Balanced").tag(false)
+            }
+            .pickerStyle(.segmented)
+            .labelsHidden()
+
+            Text("Fast results appear sooner but may be less accurate. Applies the next time you start listening.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+
+            HStack(spacing: 12) {
+                Text("Display lag")
+                    .frame(width: 82, alignment: .leading)
+
+                Slider(value: $tester.transcriptionLatencyMilliseconds, in: 0...1_000, step: 50)
+
+                Text("\(Int(tester.transcriptionLatencyMilliseconds)) ms")
+                    .monospacedDigit()
+                    .frame(width: 54, alignment: .trailing)
+            }
+
+            Text("Artificial delay before new transcript text appears. 0 ms is real time.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+    }
+
+    private var llmSpeedSection: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Label("LLM speed", systemImage: "sparkles")
+                .font(.subheadline.weight(.semibold))
+
+            Text("Reasoning level")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+
+            Picker("Reasoning level", selection: $tester.reasoningLevel) {
+                ForEach(ModelReasoningLevel.allCases) { level in
+                    Text(level.title).tag(level)
+                }
+            }
+            .pickerStyle(.segmented)
+            .labelsHidden()
+
+            Text(tester.reasoningLevel.summary)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+
+            HStack(spacing: 12) {
+                Text("Stream lag")
+                    .frame(width: 82, alignment: .leading)
+
+                Slider(value: $tester.llmStreamLatencyMilliseconds, in: 0...300, step: 25)
+
+                Text("\(Int(tester.llmStreamLatencyMilliseconds)) ms")
+                    .monospacedDigit()
+                    .frame(width: 54, alignment: .trailing)
+            }
+
+            Text("Artificial delay between streamed model updates. 0 ms is as fast as the model can respond.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+
+            Toggle(isOn: $tester.autoSendEnabled) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Send automatically")
+                    Text("Sends the newest transcript to the model on a timer.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+
+            HStack(spacing: 12) {
+                Text("Send every")
+                    .frame(width: 82, alignment: .leading)
+
+                Slider(value: $tester.cadenceSeconds, in: 1...15, step: 1)
+
+                Text("\(Int(tester.cadenceSeconds)) s")
+                    .monospacedDigit()
+                    .frame(width: 54, alignment: .trailing)
+            }
+            .disabled(!tester.autoSendEnabled)
+            .opacity(tester.autoSendEnabled ? 1 : 0.5)
+        }
+    }
+
+    private var instructionsSection: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("System instructions")
+                .font(.subheadline.weight(.semibold))
+
+            TextEditor(text: $tester.instructions)
+                .font(.callout)
+                .frame(height: 110)
+                .scrollContentBackground(.hidden)
+                .padding(8)
+                .background(
+                    Color.primary.opacity(0.05),
+                    in: RoundedRectangle(cornerRadius: 10, style: .continuous)
+                )
         }
     }
 }

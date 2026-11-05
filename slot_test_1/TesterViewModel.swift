@@ -15,6 +15,31 @@ final class TesterViewModel {
     var autoSendEnabled = true
     var cadenceSeconds: Double = 5
 
+    /// Fast speech results appear sooner but may be less accurate. Applies
+    /// the next time transcription starts.
+    var fastTranscription: Bool {
+        get { transcriber.usesFastResults }
+        set { transcriber.usesFastResults = newValue }
+    }
+
+    /// Artificial lag before new transcript text appears, in milliseconds.
+    var transcriptionLatencyMilliseconds: Double {
+        get { transcriber.transcriptUpdateInterval * 1_000 }
+        set { transcriber.setTranscriptUpdateInterval(newValue / 1_000) }
+    }
+
+    /// Reasoning depth for the on-device model. Lower levels respond faster.
+    var reasoningLevel: ModelReasoningLevel {
+        get { model.reasoningLevel }
+        set { model.reasoningLevel = newValue }
+    }
+
+    /// Artificial delay between streamed model updates, in milliseconds.
+    var llmStreamLatencyMilliseconds: Double {
+        get { model.streamUpdateInterval * 1_000 }
+        set { model.streamUpdateInterval = max(0, newValue / 1_000) }
+    }
+
     private var cadenceTask: Task<Void, Never>?
     private var lastSentTranscript = ""
 

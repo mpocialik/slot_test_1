@@ -8,7 +8,9 @@ Apple's on-device Foundation Model.
 - Captures the microphone with `AVAudioEngine`.
 - Transcribes speech live on device with `SpeechAnalyzer` / `SpeechTranscriber`.
 - Shows volatile (in-progress) words as they are recognized and commits final results.
+- Lets you tune transcription speed with fast speech results and an artificial display lag.
 - Sends the newest transcript to a `LanguageModelSession` every 5 seconds (configurable from 1–15 seconds).
+- Lets you tune LLM speed with a reasoning level and an artificial streaming lag.
 - Streams the model's response back to the screen token by token.
 - Provides "Send Now", "Clear", copy buttons, and editable system instructions.
 
@@ -57,6 +59,6 @@ settings are already in the target:
 ## Files
 
 - `ContentView.swift` — UI
-- `TesterViewModel.swift` — 5-second send loop and app state
+- `TesterViewModel.swift` — send loop, speed settings, and app state
 - `LiveSpeechTranscriber.swift` — microphone capture and live transcription
 - `FoundationModelClient.swift` — streaming Foundation Models client
