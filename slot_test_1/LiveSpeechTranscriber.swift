@@ -62,6 +62,10 @@ final class LiveSpeechTranscriber {
     }
 
     private var finalizedTurns: [TranscriptTurn] = []
+
+    /// Number of finalized turns produced in this call. Callers keep their own
+    /// cursor so they can consume each timed batch exactly once.
+    private(set) var finalizedTurnCount = 0
     private var volatileTurn: TranscriptTurn?
 
     /// The audio-time position where the current listening session begins.
@@ -143,6 +147,7 @@ final class LiveSpeechTranscriber {
         displayTask = nil
         transcript = ""
         finalizedTurns.removeAll()
+        finalizedTurnCount = 0
         volatileTurn = nil
         lastDisplayUpdate = .distantPast
         lastTurnEnd = sessionTimelineStart
@@ -165,9 +170,18 @@ final class LiveSpeechTranscriber {
     private func commitVolatileTranscript() {
         if let volatileTurn {
             finalizedTurns.append(volatileTurn)
+            finalizedTurnCount += 1
             self.volatileTurn = nil
         }
         flushTranscriptDisplay()
+    }
+
+    /// Renders finalized turns starting at `startIndex` with the speaker labels
+    /// available right now. Callers consume each batch once; labels that arrive
+    /// later do not rewrite text that was already sent.
+    func finalizedTranscriptText(from startIndex: Int) -> String {
+        guard startIndex >= 0, startIndex < finalizedTurns.count else { return "" }
+        return render(turns: Array(finalizedTurns[startIndex...]))
     }
 
     // MARK: - Permissions
@@ -325,6 +339,7 @@ final class LiveSpeechTranscriber {
                 self.volatileTurn = nil
             }
             finalizedTurns.append(turn)
+            finalizedTurnCount += 1
         } else {
             volatileTurn = turn
         }
@@ -390,7 +405,10 @@ final class LiveSpeechTranscriber {
 
     private func renderTranscript() -> String {
         let turns = finalizedTurns + (volatileTurn.map { [$0] } ?? [])
+        return render(turns: turns)
+    }
 
+    private func render(turns: [TranscriptTurn]) -> String {
         guard usesSpeakerLabels, sessionUsesSpeakerLabels, diarization.hasSpeakers else {
             return turns.map(\.text).joined()
         }

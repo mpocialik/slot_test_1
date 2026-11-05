@@ -272,7 +272,7 @@ struct ContentView: View {
         .buttonStyle(.bordered)
         .controlSize(.large)
         .disabled(!tester.canSendNow || tester.isPreparing)
-        .accessibilityLabel("Send transcript now")
+        .accessibilityLabel("Send pending speech to the ledger")
     }
 
     private func clearButton(compact: Bool) -> some View {
@@ -313,14 +313,14 @@ struct ContentView: View {
 
     private var responsePanel: some View {
         PanelCard(
-            title: "Foundation Model Response",
-            systemImage: "sparkles",
+            title: "Running Ledger",
+            systemImage: "list.clipboard",
             showsProgress: tester.isResponding,
             copyText: tester.modelOutput
         ) {
             if tester.modelOutput.isEmpty {
                 Text(tester.isResponding
-                     ? "Thinking…"
+                     ? "Updating ledger…"
                      : responsePlaceholder)
                     .foregroundStyle(.secondary)
             } else {
@@ -428,9 +428,9 @@ struct ContentView: View {
 
     private var responsePlaceholder: String {
         if tester.autoSendEnabled {
-            return "The newest transcript is sent to the model automatically every \(Int(tester.cadenceSeconds)) seconds."
+            return "New finalized speech is folded into the ledger every \(Int(tester.cadenceSeconds)) seconds."
         }
-        return "Tap Send Now to send the current transcript to the model."
+        return "Tap Send Now to fold pending speech into the ledger."
     }
 
     private var systemSettingsURL: URL? {
@@ -461,13 +461,11 @@ private struct ConfigurationPanel: View {
                     Divider()
                     llmSpeedSection
                     Divider()
-                    conversationSection
-                    Divider()
                     instructionsSection
                 }
                 .padding(.top, 10)
             } label: {
-                Text("Speed, speakers, memory, and model instructions")
+                Text("Speed, speakers, and ledger instructions")
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
             }
@@ -759,7 +757,7 @@ private struct ConfigurationPanel: View {
             Toggle(isOn: $tester.autoSendEnabled) {
                 VStack(alignment: .leading, spacing: 2) {
                     Text("Send automatically")
-                    Text("Sends the newest transcript to the model on a timer.")
+                    Text("Folds new finalized speech into the ledger on a timer.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
@@ -777,26 +775,6 @@ private struct ConfigurationPanel: View {
             }
             .disabled(!tester.autoSendEnabled)
             .opacity(tester.autoSendEnabled ? 1 : 0.5)
-        }
-    }
-
-    private var conversationSection: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Label("Conversation", systemImage: "bubble.left.and.bubble.right")
-                .font(.subheadline.weight(.semibold))
-
-            Toggle(isOn: $tester.conversationMemoryEnabled) {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("Conversation memory")
-                    Text("Keeps earlier transcripts and model replies in context. Off sends each request independently.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-            }
-
-            Text("Toggling memory or pressing Clear starts a fresh conversation.")
-                .font(.caption)
-                .foregroundStyle(.secondary)
         }
     }
 

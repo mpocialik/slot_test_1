@@ -12,9 +12,9 @@ Apple's on-device Foundation Model.
   rendering turns as “Speaker 1”, “Speaker 2”, and so on. Up to four speakers.
 - Shows volatile (in-progress) words as they are recognized and commits final results.
 - Lets you tune transcription speed with fast speech results and an artificial display lag.
-- Sends the newest transcript to a `LanguageModelSession` every 5 seconds (configurable from 1–15 seconds).
-- Lets you tune LLM speed with a reasoning level and an artificial streaming lag.
-- Optionally keeps earlier transcripts and model replies in conversation context.
+- Lets you tune model speed with a reasoning level and an artificial streaming lag.
+- Folds each batch of finalized speech into a running medical ledger every 5 seconds (configurable from 1–15 seconds).
+- Keeps the ledger as the conversation state, so earlier speech and replies survive without an unbounded session history.
 - Streams the model's response back to the screen token by token.
 - Provides "Send Now", "Clear", copy buttons, and editable system instructions
   that persist across launches.
@@ -87,6 +87,41 @@ custom text and goes back to the version currently in the bundle. If the file
 is missing or empty, the app falls back to an inline copy of the prompt in
 `TesterViewModel.swift`.
 
+The default prompt is the medical-scribe ledger contract. The client always
+wraps input as `PREVIOUS LEDGER` and `NEW TRANSCRIPT`, so a custom prompt should
+keep that two-block shape if it wants to use the running ledger as state.
+
+## Running ledger
+
+The ledger is the only model workload. Each update is a stateless request:
+
+```
+previous ledger + new finalized speech -> updated ledger
+```
+
+No `LanguageModelSession` history is carried between updates. The ledger itself
+is the state, so it stays bounded, can be inspected, and survives an ASR
+revision or a context overflow.
+
+Behavior worth knowing:
+
+- Only **finalized** speech is sent. Volatile words stay on screen but never
+  enter the ledger, so a revised partial result cannot corrupt the state.
+- The transcript cursor advances only after a successful update. If the model
+  errors or the request is interrupted, the same speech is retried next tick.
+- `Send Now` flushes pending finalized speech and does not re-send anything
+  already folded in.
+- If the ledger grows past roughly 6,000 characters, a separate compaction turn
+  shortens it while preserving every fact and tag. An update that loses a large
+  share of the existing bullets is rejected once and retried with a preservation
+  reminder.
+- The ledger is persisted in `UserDefaults` (`runningLedger`) so a crash or a
+  backgrounded call does not lose it. **Clear** starts a new call and resets it.
+
+Because the default prompt asks for the complete ledger on every turn, the
+cadence is a real tradeoff: a 10–15 second interval keeps the per-update prompt
+smaller and is usually enough for a scribe that is reviewed after the call.
+
 ## Requirements
 
 - Xcode 27.3 or later.
@@ -138,7 +173,7 @@ precision: palettized on iOS, fp16 on macOS).
 ## Files
 
 - `ContentView.swift` — UI
-- `TesterViewModel.swift` — send loop, speed settings, and app state
+- `TesterViewModel.swift` — ledger state, send loop, speed settings, and app state
 - `LiveSpeechTranscriber.swift` — microphone capture and live transcription
 - `SpeakerDiarization.swift` — FluidAudio Sortformer speaker labels
-- `FoundationModelClient.swift` — streaming Foundation Models client
+- `FoundationModelClient.swift` — stateless ledger updates through Foundation Models

@@ -23,17 +23,22 @@ speaker diarization via FluidAudio.
 - `MyApp.swift` — `@main` entrypoint.
 - `ContentView.swift` — all UI in one file.
 - `TesterViewModel.swift` — `@MainActor @Observable` orchestrator: owns the
-  transcriber and model client, runs the auto-send timer loop.
-- `DefaultSystemPrompt.md` — the built-in system prompt. Loaded from the app
-  bundle at launch (`TesterViewModel.defaultInstructions`), so edit this file
-  instead of Swift source to change the default. An inline copy in
+  transcriber and model client, owns the committed ledger, tracks the finalized
+  transcript cursor, and runs the auto-send timer loop.
+- `DefaultSystemPrompt.md` — the built-in system prompt. It defines the
+  two-block ledger contract (`PREVIOUS LEDGER` + `NEW TRANSCRIPT`). Loaded from
+  the app bundle at launch (`TesterViewModel.defaultInstructions`), so edit this
+  file instead of Swift source to change the default. An inline copy in
   `TesterViewModel.swift` is only the fallback if the resource is missing.
 - `LiveSpeechTranscriber.swift` — `AVAudioEngine` mic capture + live
-  transcription; also owns the diarization capture.
+  transcription; also owns the diarization capture. Exposes finalized turns by
+  index so the view model can consume each batch once.
 - `SpeakerDiarization.swift` — FluidAudio Sortformer diarization
   (`DiarizationAudioCapture`, `SpeakerDiarizationEngine` actor,
   `SpeakerDiarizationService`) and speaker-label lookup.
-- `FoundationModelClient.swift` — streaming `SystemLanguageModel` client.
+- `FoundationModelClient.swift` — stateless ledger updater: sends
+  `previous ledger + new transcript` to `SystemLanguageModel` and streams back
+  the complete updated ledger. No session history is retained.
 
 Audio flow: one `installTap` feeds both the speech analyzer (via
 `AnalyzerInputConverter`) and `DiarizationAudioCapture`, which resamples to
@@ -60,7 +65,8 @@ actor, which forwards samples to the engine actor for inference.
   Reasoning levels are ignored by the on-device model (`SystemLanguageModel`
   lacks the `.reasoning` capability) — see `FoundationModelClient.swift`.
 - Persisted settings use `UserDefaults` keys `systemInstructions`,
-  `speakerLabelsEnabled`, and `diarizationTuning` (JSON). `systemInstructions`
+  `speakerLabelsEnabled`, `diarizationTuning` (JSON), and `runningLedger` (the
+  committed ledger, cleared by **Clear**). `systemInstructions`
   is only written when the text differs from the bundled default, so a rebuild
   after editing `DefaultSystemPrompt.md` is picked up unless the user typed a
   custom prompt (**Reset to default** clears it).

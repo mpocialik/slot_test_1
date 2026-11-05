@@ -45,7 +45,14 @@ enum ModelReasoningLevel: String, CaseIterable, Identifiable {
     }
 }
 
-/// Streams responses from Apple's on-device Foundation Model.
+/// Folds finalized speech into a running medical ledger using Apple's
+/// on-device Foundation Model.
+///
+/// The ledger is the conversation state. Every update is a stateless request
+/// of the form `previous ledger + new transcript -> updated ledger`; no
+/// `LanguageModelSession` history is carried between updates. That keeps the
+/// prompt bounded, makes overflow recoverable, and means an ASR revision can
+/// never invalidate a shared session.
 @MainActor
 @Observable
 final class FoundationModelClient {
@@ -65,16 +72,16 @@ final class FoundationModelClient {
     /// tokens as fast as the model produces them.
     var streamUpdateInterval: TimeInterval = 0
 
-    /// When enabled, requests share one conversation session so the model can
-    /// refer to earlier transcripts and replies.
-    var conversationMemoryEnabled = false
+    /// Compact the ledger before it grows past this many characters. The
+    /// compaction turn must preserve every fact and tag.
+    private static let ledgerCharacterBudget = 6_000
+
+    /// Safety net for one update's transcript. A cadence-sized batch is far
+    /// below this; the limit only prevents a runaway prompt.
+    private static let transcriptCharacterLimit = 8_000
 
     private var responseTask: Task<Void, Never>?
     private var activeRequestID = UUID()
-
-    private var memorySession: LanguageModelSession?
-    private var memoryInstructions = ""
-    private var memoryLastTranscript = ""
 
     var isAvailable: Bool {
         if case .available = availability { return true }
@@ -102,64 +109,95 @@ final class FoundationModelClient {
         supportsReasoning = model.capabilities.contains(.reasoning)
     }
 
-    func send(_ transcript: String, instructions: String) {
-        let transcript = transcript.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !transcript.isEmpty else { return }
+    /// Shows a persisted ledger after launch without starting a request.
+    func restoreLedger(_ text: String) {
+        guard !isResponding else { return }
+        output = text
+    }
+
+    /// Folds `newTranscript` into `previousLedger`.
+    ///
+    /// `completion(true)` means `output` holds a complete replacement ledger.
+    /// `completion(false)` means the ledger is unchanged and the caller should
+    /// keep the transcript pending for the next attempt. The completion may be
+    /// called after a newer request has superseded this one; callers must
+    /// ignore stale results.
+    func updateLedger(
+        previousLedger: String,
+        newTranscript: String,
+        instructions: String,
+        completion: @escaping (Bool) -> Void
+    ) {
+        let transcript = newTranscript.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !transcript.isEmpty else {
+            completion(false)
+            return
+        }
 
         refreshAvailability()
         guard isAvailable else {
             errorMessage = "Foundation Models is unavailable: \(availabilityText)."
+            completion(false)
             return
         }
 
-        let memoryEnabled = conversationMemoryEnabled
-        let interruptedResponse = isResponding
         responseTask?.cancel()
-
-        // An interrupted turn may have been partially recorded in the shared
-        // session, so start the new request with a clean conversation.
-        if interruptedResponse, memoryEnabled {
-            resetConversation()
-        }
 
         let requestID = UUID()
         activeRequestID = requestID
-
         isResponding = true
-        output = ""
         errorMessage = nil
 
+        let baseline = previousLedger.trimmingCharacters(in: .whitespacesAndNewlines)
+        // Drop any partial ledger from an interrupted stream.
+        output = baseline
+
         responseTask = Task { [weak self] in
-            guard let self else { return }
+            guard let self else {
+                completion(false)
+                return
+            }
+
+            var succeeded = false
 
             defer {
                 if self.activeRequestID == requestID {
                     self.isResponding = false
                     self.responseTask = nil
                 }
+                completion(succeeded)
             }
 
-            var didRetryAfterContextOverflow = false
+            var ledger = baseline
+            var didRetryAfterOverflow = false
+            var didRetryAfterShrink = false
+            var forceCompaction = false
 
             while !Task.isCancelled, self.activeRequestID == requestID {
-                let request = self.prepareRequest(
-                    transcript: transcript,
-                    instructions: instructions,
-                    memoryEnabled: memoryEnabled
+                if forceCompaction || ledger.count > Self.ledgerCharacterBudget {
+                    if let compacted = await self.compactLedger(
+                        ledger,
+                        instructions: instructions,
+                        requestID: requestID
+                    ) {
+                        ledger = compacted
+                    }
+                    forceCompaction = false
+
+                    guard !Task.isCancelled, self.activeRequestID == requestID else { return }
+                }
+
+                let prompt = self.ledgerPrompt(
+                    previousLedger: ledger,
+                    newTranscript: transcript,
+                    preserveAllBullets: didRetryAfterShrink
                 )
 
                 do {
-                    // Only request a reasoning level when the model advertises
-                    // the `.reasoning` capability. Passing one to the on-device
-                    // model throws `unsupportedCapability`.
-                    let contextOptions = ContextOptions(
-                        reasoningLevel: self.supportsReasoning
-                            ? self.reasoningLevel.contextLevel
-                            : nil
-                    )
-                    let stream = request.session.streamResponse(
-                        to: request.prompt,
-                        contextOptions: contextOptions
+                    let session = self.makeSession(instructions: instructions)
+                    let stream = session.streamResponse(
+                        to: prompt,
+                        contextOptions: self.contextOptions()
                     )
 
                     var isFirstUpdate = true
@@ -173,28 +211,49 @@ final class FoundationModelClient {
                         self.output = snapshot.content
                     }
 
-                    if memoryEnabled, self.conversationMemoryEnabled {
-                        self.memoryLastTranscript = transcript
+                    guard !Task.isCancelled, self.activeRequestID == requestID else { return }
+
+                    let newLedger = self.output
+                        .trimmingCharacters(in: .whitespacesAndNewlines)
+                    guard !newLedger.isEmpty else {
+                        // Never replace a real ledger with an empty response.
+                        self.output = ledger
+                        self.errorMessage = "The model returned an empty ledger."
+                        return
                     }
-                    return
-                } catch {
-                    if memoryEnabled,
-                       let languageModelError = error as? LanguageModelError,
-                       case .contextSizeExceeded = languageModelError,
-                       !didRetryAfterContextOverflow {
-                        // Drop the conversation and retry once with a fresh
-                        // session containing only the current transcript.
-                        didRetryAfterContextOverflow = true
-                        self.resetConversation()
-                        self.output = ""
+
+                    // A ledger must never silently lose clinical facts. If a
+                    // large share of the bullets disappeared, retry once with
+                    // an explicit preservation reminder before accepting. A
+                    // small drop is allowed so duplicate bullets can merge.
+                    let previousBullets = Self.bulletCount(in: ledger)
+                    let newBullets = Self.bulletCount(in: newLedger)
+                    if previousBullets >= 4,
+                       newBullets * 4 < previousBullets * 3,
+                       !didRetryAfterShrink {
+                        didRetryAfterShrink = true
+                        self.output = ledger
                         continue
                     }
 
+                    succeeded = true
+                    return
+                } catch {
                     guard !Task.isCancelled, self.activeRequestID == requestID else { return }
-                    self.errorMessage = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
-                    if memoryEnabled {
-                        self.resetConversation()
+
+                    if let languageModelError = error as? LanguageModelError,
+                       case .contextSizeExceeded = languageModelError,
+                       !didRetryAfterOverflow {
+                        // Compact and retry once with a smaller ledger.
+                        didRetryAfterOverflow = true
+                        forceCompaction = true
+                        self.output = ledger
+                        continue
                     }
+
+                    self.output = baseline
+                    self.errorMessage = (error as? LocalizedError)?.errorDescription
+                        ?? error.localizedDescription
                     return
                 }
             }
@@ -208,66 +267,90 @@ final class FoundationModelClient {
         isResponding = false
     }
 
-    /// Forgets any retained conversation so the next request starts fresh.
-    func resetConversation() {
-        memorySession = nil
-        memoryInstructions = ""
-        memoryLastTranscript = ""
-    }
-
     func clear() {
         cancel()
-        resetConversation()
         output = ""
         errorMessage = nil
     }
 
-    private func prepareRequest(
-        transcript: String,
-        instructions: String,
-        memoryEnabled: Bool
-    ) -> (session: LanguageModelSession, prompt: String) {
-        guard memoryEnabled else {
-            resetConversation()
-            return (makeSession(instructions: instructions), promptText(from: transcript))
+    // MARK: - Request building
+
+    private func ledgerPrompt(
+        previousLedger: String,
+        newTranscript: String,
+        preserveAllBullets: Bool
+    ) -> String {
+        let ledger = previousLedger.isEmpty ? "(empty)" : previousLedger
+
+        var prompt = """
+        PREVIOUS LEDGER:
+        \(ledger)
+
+        NEW TRANSCRIPT:
+        \(promptText(from: newTranscript))
+        """
+
+        if preserveAllBullets {
+            prompt += """
+
+
+            IMPORTANT: Your previous answer dropped bullets from the ledger. \
+            Carry forward every existing bullet exactly as written and only \
+            add or update.
+            """
         }
 
-        if let session = memorySession,
-           memoryInstructions == instructions {
-            let commonLength = commonPrefixLength(memoryLastTranscript, transcript)
-
-            if commonLength > 0 || memoryLastTranscript.isEmpty {
-                let delta = String(transcript.dropFirst(commonLength))
-                    .trimmingCharacters(in: .whitespacesAndNewlines)
-
-                if !delta.isEmpty {
-                    // Send only what changed since the previous turn. Earlier
-                    // speech and replies are already in the shared session.
-                    return (session, promptText(from: delta))
-                }
-
-                // Nothing new was said (for example, "Send Now"). Resend the
-                // latest transcript while keeping the conversation intact.
-                return (session, promptText(from: transcript))
-            }
-        }
-
-        resetConversation()
-        let session = makeSession(instructions: instructions)
-        memorySession = session
-        memoryInstructions = instructions
-        return (session, promptText(from: transcript))
+        return prompt
     }
 
-    /// Finds where the live transcript diverges from what the model last saw.
-    /// Volatile speech results can be revised when they become final, so this
-    /// is not always a simple prefix append.
-    private func commonPrefixLength(_ old: String, _ new: String) -> Int {
-        zip(old, new).prefix { $0 == $1 }.count
+    /// Runs a separate, non-streaming-to-UI turn that shortens the ledger
+    /// while preserving every fact and tag.
+    private func compactLedger(
+        _ ledger: String,
+        instructions: String,
+        requestID: UUID
+    ) async -> String? {
+        let prompt = """
+        Compress the ledger below. Preserve every distinct clinical fact and \
+        every <MentionPrescription> or <MentionAppointment> tag. Merge \
+        duplicate or redundant bullets and shorten wording. Do not add any \
+        new fact. Output only the bulleted list.
+
+        LEDGER:
+        \(ledger)
+        """
+
+        do {
+            let session = makeSession(instructions: instructions)
+            let stream = session.streamResponse(
+                to: prompt,
+                contextOptions: contextOptions()
+            )
+
+            var compacted = ""
+            for try await snapshot in stream {
+                guard !Task.isCancelled, activeRequestID == requestID else { return nil }
+                compacted = snapshot.content
+            }
+
+            let trimmed = compacted.trimmingCharacters(in: .whitespacesAndNewlines)
+            return trimmed.isEmpty ? nil : trimmed
+        } catch {
+            return nil
+        }
+    }
+
+    /// Only request a reasoning level when the model advertises the
+    /// `.reasoning` capability. Passing one to the on-device model throws
+    /// `unsupportedCapability`.
+    private func contextOptions() -> ContextOptions {
+        ContextOptions(
+            reasoningLevel: supportsReasoning ? reasoningLevel.contextLevel : nil
+        )
     }
 
     private func promptText(from text: String) -> String {
-        let limit = 6_000
+        let limit = Self.transcriptCharacterLimit
         guard text.count > limit else { return text }
         return "…" + String(text.suffix(limit))
     }
@@ -278,5 +361,15 @@ final class FoundationModelClient {
             return LanguageModelSession()
         }
         return LanguageModelSession(instructions: instructions)
+    }
+
+    /// Counts top-level bullets only; nested tag bullets are indented and are
+    /// intentionally ignored.
+    private static func bulletCount(in text: String) -> Int {
+        text.split(whereSeparator: \.isNewline).reduce(into: 0) { count, line in
+            if line.hasPrefix("* ") {
+                count += 1
+            }
+        }
     }
 }

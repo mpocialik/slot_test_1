@@ -10,6 +10,7 @@ final class TesterViewModel {
     private static let instructionsDefaultsKey = "systemInstructions"
     private static let speakerLabelsDefaultsKey = "speakerLabelsEnabled"
     private static let diarizationTuningDefaultsKey = "diarizationTuning"
+    private static let ledgerDefaultsKey = "runningLedger"
 
     /// Name of the bundled file holding the built-in prompt. It is a plain
     /// `.md` file so it can be edited in any text editor without opening Xcode.
@@ -43,10 +44,18 @@ final class TesterViewModel {
     }()
 
     private static let inlineDefaultInstructions = """
-    You are a helpful assistant running inside a live speech transcription tester. \
-    The user's message is a speech transcript and may contain recognition errors. \
-    The transcript may label turns as "Speaker 1:", "Speaker 2:", and so on. \
-    Reply concisely in plain text, in the same language as the transcript.
+    You are a precise medical scribe maintaining a running ledger of a patient \
+    phone call. Each update gives you the PREVIOUS LEDGER and the NEW TRANSCRIPT \
+    of finalized speech. Carry forward every existing bullet and add atomic \
+    bullets for new clinical facts, symptoms, requests, and doctor actions. Never \
+    invent facts and never delete a bullet; rewrite a bullet in place if new \
+    speech corrects it. Infer which speaker is the physician or patient from \
+    content; "Speaker 1"/"Speaker 2" numbers are not stable. Tag a bullet with \
+    <MentionPrescription> only for an explicit prescription request (refill, \
+    renewal, new prescription, or dosage change), and with <MentionAppointment> \
+    only when scheduling an in-office appointment is explicitly discussed. If \
+    the new transcript has no new clinical data, return the previous ledger \
+    unchanged. Output only the complete bulleted ledger.
     """
 
     /// Persisted in `UserDefaults` so custom instructions survive relaunches.
@@ -64,6 +73,10 @@ final class TesterViewModel {
 
     var autoSendEnabled = true
     var cadenceSeconds: Double = 5
+
+    /// The committed running ledger. This is the model's conversation state:
+    /// each update receives it and returns a complete replacement.
+    private(set) var ledger = ""
 
     /// Adds on-device speaker labels to the transcript. The setting is read
     /// when a listening session starts.
@@ -88,6 +101,9 @@ final class TesterViewModel {
         instructions = UserDefaults.standard.string(forKey: Self.instructionsDefaultsKey)
             ?? Self.defaultInstructions
 
+        let savedLedger = UserDefaults.standard.string(forKey: Self.ledgerDefaultsKey) ?? ""
+        ledger = savedLedger
+
         let savedSpeakerLabels = UserDefaults.standard.object(
             forKey: Self.speakerLabelsDefaultsKey
         ) as? Bool ?? true
@@ -100,6 +116,8 @@ final class TesterViewModel {
         } else {
             diarizationTuning = .default
         }
+
+        model.restoreLedger(savedLedger)
     }
 
     /// Fast speech results appear sooner but may be less accurate. Applies
@@ -127,19 +145,9 @@ final class TesterViewModel {
         set { model.streamUpdateInterval = max(0, newValue / 1_000) }
     }
 
-    /// When enabled, the model keeps earlier transcripts and replies in context.
-    /// Turning memory off or on starts a fresh conversation.
-    var conversationMemoryEnabled: Bool {
-        get { model.conversationMemoryEnabled }
-        set {
-            guard newValue != model.conversationMemoryEnabled else { return }
-            model.conversationMemoryEnabled = newValue
-            model.resetConversation()
-        }
-    }
-
     private var cadenceTask: Task<Void, Never>?
-    private var lastSentTranscript = ""
+    private var consumedFinalizedTurnCount = 0
+    private var sendGeneration = 0
 
     var transcript: String {
         transcriber.transcript
@@ -267,7 +275,7 @@ final class TesterViewModel {
     }
 
     var canSendNow: Bool {
-        !transcript.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && model.isAvailable
+        transcriber.finalizedTurnCount > consumedFinalizedTurnCount && model.isAvailable
     }
 
     func resetDiarizationTuning() {
@@ -289,7 +297,6 @@ final class TesterViewModel {
         await transcriber.start()
 
         if transcriber.isListening {
-            lastSentTranscript = transcriber.transcript.trimmingCharacters(in: .whitespacesAndNewlines)
             model.refreshAvailability()
             startCadenceLoop()
         }
@@ -302,13 +309,16 @@ final class TesterViewModel {
     }
 
     func sendNow() {
-        sendTranscriptIfNeeded(force: true)
+        flushPendingTranscript(force: true)
     }
 
     func clear() {
+        sendGeneration += 1
         transcriber.clear()
         model.clear()
-        lastSentTranscript = ""
+        consumedFinalizedTurnCount = 0
+        ledger = ""
+        persistLedger()
     }
 
     func refreshModelAvailability() {
@@ -332,22 +342,55 @@ final class TesterViewModel {
 
                 if Date.now.timeIntervalSince(lastSend) >= self.cadenceSeconds {
                     lastSend = .now
-                    self.sendTranscriptIfNeeded()
+                    self.flushPendingTranscript()
                 }
             }
         }
     }
 
-    private func sendTranscriptIfNeeded(force: Bool = false) {
-        let text = transcript.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !text.isEmpty, model.isAvailable else { return }
-        guard force || text != lastSentTranscript else { return }
+    /// Sends the next batch of finalized speech. The ledger cursor only moves
+    /// forward after the model returns a complete replacement ledger, so a
+    /// failed or interrupted update is retried with the same text.
+    private func flushPendingTranscript(force: Bool = false) {
+        let total = transcriber.finalizedTurnCount
+        guard total > consumedFinalizedTurnCount, model.isAvailable else { return }
 
-        // Auto-send never overlaps an in-flight generation. If the model is
-        // still responding, the next tick will pick up the newest transcript.
+        // Auto-send never overlaps an in-flight update. Send Now may interrupt.
         guard force || !model.isResponding else { return }
 
-        lastSentTranscript = text
-        model.send(text, instructions: instructions)
+        let start = consumedFinalizedTurnCount
+        let text = transcriber.finalizedTranscriptText(from: start)
+        guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            consumedFinalizedTurnCount = total
+            return
+        }
+
+        sendGeneration += 1
+        let generation = sendGeneration
+        let end = total
+
+        model.updateLedger(
+            previousLedger: ledger,
+            newTranscript: text,
+            instructions: instructions
+        ) { [weak self] succeeded in
+            guard let self, self.sendGeneration == generation else { return }
+            guard succeeded else { return }
+
+            // The transcript may have advanced while the model was responding;
+            // commit only the turns included in this request.
+            self.consumedFinalizedTurnCount = end
+            self.ledger = self.model.output
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            self.persistLedger()
+        }
+    }
+
+    private func persistLedger() {
+        if ledger.isEmpty {
+            UserDefaults.standard.removeObject(forKey: Self.ledgerDefaultsKey)
+        } else {
+            UserDefaults.standard.set(ledger, forKey: Self.ledgerDefaultsKey)
+        }
     }
 }
