@@ -33,6 +33,9 @@ final class LiveSpeechTranscriber {
         }
     }
 
+    /// Diarization preset and timeline tuning. Read when a session starts.
+    var diarizationTuning: DiarizationTuning = .default
+
     /// On-device speaker diarization state and speaker-label lookup.
     let diarization: SpeakerDiarizationService
 
@@ -268,7 +271,8 @@ final class LiveSpeechTranscriber {
         sessionUsesSpeakerLabels = usesSpeakerLabels
         let diarizationGeneration = diarization.startCapture(
             enabled: usesSpeakerLabels,
-            timeOffset: sessionTimelineStart
+            timeOffset: sessionTimelineStart,
+            tuning: diarizationTuning
         )
         if usesSpeakerLabels {
             diarizationTask?.cancel()

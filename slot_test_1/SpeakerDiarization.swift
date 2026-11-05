@@ -16,6 +16,78 @@ nonisolated struct SpeakerSegment: Sendable, Equatable {
     let isFinalized: Bool
 }
 
+/// Sortformer streaming presets exposed in the tuning UI.
+nonisolated enum DiarizationModelPreset: String, CaseIterable, Identifiable, Codable, Sendable {
+    case fast
+    case balanced
+    case efficient
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .fast: return "Fast"
+        case .balanced: return "Balanced"
+        case .efficient: return "Efficient"
+        }
+    }
+
+    var summary: String {
+        switch self {
+        case .fast:
+            return "Lowest compute and smallest context. Good for quick experiments."
+        case .balanced:
+            return "Best speaker stability at about one second of latency."
+        case .efficient:
+            return "Higher throughput with about two seconds of output latency."
+        }
+    }
+
+    var sortformerConfiguration: SortformerConfig {
+        switch self {
+        case .fast: return .fastV2_1
+        case .balanced: return .balancedV2_1
+        case .efficient: return .efficientV2_1
+        }
+    }
+}
+
+/// User-tunable diarization behavior. The model preset and the timeline
+/// thresholds are read when a listening session starts.
+nonisolated struct DiarizationTuning: Codable, Equatable, Sendable {
+    var preset: DiarizationModelPreset = .balanced
+
+    /// 0 = conservative, 1 = eager. Drives both onset and offset thresholds.
+    var sensitivity: Double = 0.5
+
+    /// Pauses shorter than this are merged into one speaker turn.
+    var minGapSeconds: Double = 0
+
+    /// Speech bursts shorter than this are discarded.
+    var minSegmentSeconds: Double = 0
+
+    /// How far away a speaker segment can be while still labeling a phrase.
+    var labelGracePeriod: Double = 1.5
+
+    var debugLogging: Bool = false
+
+    static let `default` = DiarizationTuning()
+
+    var timelineConfiguration: DiarizerTimelineConfig {
+        var config = DiarizerTimelineConfig.sortformerDefault
+
+        let clampedSensitivity = min(max(sensitivity, 0), 1)
+        let threshold = Float(min(max(1 - clampedSensitivity, 0.1), 0.9))
+        config.onsetThreshold = threshold
+        config.offsetThreshold = threshold
+        config.minDurationOn = Float(min(max(minSegmentSeconds, 0), 2))
+        config.minDurationOff = Float(min(max(minGapSeconds, 0), 2))
+
+        return config
+    }
+
+}
+
 /// Captures microphone audio and resamples it to the 16 kHz mono Float32
 /// format that FluidAudio's diarizers expect.
 ///
@@ -174,25 +246,49 @@ nonisolated final class DiarizationAudioCapture: @unchecked Sendable {
 /// conversation and streams with roughly one second of latency. It supports
 /// up to four simultaneous speakers.
 actor SpeakerDiarizationEngine {
+    private var models: SortformerModels?
     private var diarizer: SortformerDiarizer?
 
-    private static func makeConfiguration() -> SortformerConfig {
-        var config = SortformerConfig.balancedV2_1
+    private static func makeConfiguration(tuning: DiarizationTuning) -> SortformerConfig {
+        var config = tuning.preset.sortformerConfiguration
         #if os(iOS) || os(visionOS)
         // The palettized build is about 100 MB instead of 250 MB and keeps
         // memory pressure low on phones, at a small accuracy cost.
         config.precision = .palettized
         #endif
+        config.debugMode = tuning.debugLogging
         return config
     }
 
-    func load(onProgress: @escaping @Sendable (DownloadProgress) -> Void) async throws {
-        let config = Self.makeConfiguration()
+    func load(
+        tuning: DiarizationTuning,
+        onProgress: @escaping @Sendable (DownloadProgress) -> Void
+    ) async throws {
+        let config = Self.makeConfiguration(tuning: tuning)
         let models = try await SortformerModels.loadFromHuggingFace(
             config: config,
             progressHandler: onProgress
         )
-        let diarizer = SortformerDiarizer(config: config)
+        self.models = models
+        makeDiarizer(config: config, tuning: tuning)
+    }
+
+    /// Recreates the streaming diarizer with new timeline thresholds and debug
+    /// settings without downloading or recompiling the model. Only valid when
+    /// the model preset is unchanged.
+    func reconfigure(tuning: DiarizationTuning) {
+        guard models != nil else { return }
+        let config = Self.makeConfiguration(tuning: tuning)
+        makeDiarizer(config: config, tuning: tuning)
+    }
+
+    private func makeDiarizer(config: SortformerConfig, tuning: DiarizationTuning) {
+        guard let models else { return }
+        diarizer?.cleanup()
+        let diarizer = SortformerDiarizer(
+            config: config,
+            timelineConfig: tuning.timelineConfiguration
+        )
         diarizer.initialize(models: models)
         self.diarizer = diarizer
     }
@@ -228,6 +324,7 @@ actor SpeakerDiarizationEngine {
     func release() {
         diarizer?.cleanup()
         diarizer = nil
+        models = nil
     }
 
     private func snapshot(of diarizer: SortformerDiarizer) -> [SpeakerSegment] {
@@ -274,6 +371,7 @@ final class SpeakerDiarizationService {
     private(set) var isPreparing = false
     private(set) var isRunning = false
     private(set) var isModelLoaded = false
+    private(set) var isModelLoading = false
     private(set) var statusMessage = "Speaker labels off"
     private(set) var errorMessage: String?
     private(set) var downloadProgress: Double?
@@ -286,6 +384,8 @@ final class SpeakerDiarizationService {
     @ObservationIgnored private var timelineOffset: TimeInterval = 0
     @ObservationIgnored private var sessionKeyBase = 0
     @ObservationIgnored private var lastSpeakerKey: Int?
+    @ObservationIgnored private var loadedPreset: DiarizationModelPreset?
+    @ObservationIgnored private var sessionTuning: DiarizationTuning = .default
 
     /// Called whenever speaker segments change so the transcript can be
     /// re-rendered with updated labels.
@@ -310,10 +410,15 @@ final class SpeakerDiarizationService {
     /// Starts collecting audio for a new listening session. The model load is
     /// kicked off separately so the caller can start transcription in parallel.
     @discardableResult
-    func startCapture(enabled: Bool, timeOffset: TimeInterval) -> Int {
+    func startCapture(
+        enabled: Bool,
+        timeOffset: TimeInterval,
+        tuning: DiarizationTuning
+    ) -> Int {
         generation += 1
         let sessionGeneration = generation
 
+        sessionTuning = tuning
         processingTask?.cancel()
         processingTask = nil
 
@@ -350,7 +455,7 @@ final class SpeakerDiarizationService {
 
         let engine: SpeakerDiarizationEngine
         do {
-            engine = try await loadEngine()
+            engine = try await loadEngine(tuning: sessionTuning)
         } catch {
             guard !Task.isCancelled, sessionGeneration == generation else { return }
             capture.isEnabled = false
@@ -375,12 +480,25 @@ final class SpeakerDiarizationService {
     /// Loads the model once per app run. Concurrent listeners share the same
     /// in-flight load, and a load that outlives its session is kept so the next
     /// session starts instantly.
-    private func loadEngine() async throws -> SpeakerDiarizationEngine {
-        if let engine {
+    ///
+    /// Timeline/debug changes reuse the loaded model. A preset change releases
+    /// the old engine and loads the new model bundle.
+    private func loadEngine(tuning: DiarizationTuning) async throws -> SpeakerDiarizationEngine {
+        // A previous session may still be downloading in the background.
+        if let loadTask {
+            _ = try? await loadTask.value
+        }
+
+        if let engine, loadedPreset == tuning.preset {
+            await engine.reconfigure(tuning: tuning)
             return engine
         }
-        if let loadTask {
-            return try await loadTask.value
+
+        if let engine {
+            await engine.release()
+            self.engine = nil
+            loadedPreset = nil
+            isModelLoaded = false
         }
 
         let onProgress: @Sendable (DownloadProgress) -> Void = { [weak self] progress in
@@ -389,30 +507,44 @@ final class SpeakerDiarizationService {
             }
         }
 
-        let task = Task { () throws -> SpeakerDiarizationEngine in
+        let task = Task { [weak self] () throws -> SpeakerDiarizationEngine in
             let newEngine = SpeakerDiarizationEngine()
             do {
-                try await newEngine.load(onProgress: onProgress)
+                try await newEngine.load(tuning: tuning, onProgress: onProgress)
+                if let self {
+                    self.engine = newEngine
+                    self.loadedPreset = tuning.preset
+                    self.isModelLoaded = true
+                    self.isModelLoading = false
+                    self.loadTask = nil
+                    self.statusMessage = self.isRunning
+                        ? "Speaker labels on"
+                        : "Speaker labels ready"
+                }
                 return newEngine
             } catch {
                 await newEngine.release()
+                if let self {
+                    self.isModelLoading = false
+                    self.loadTask = nil
+                    if error is CancellationError {
+                        self.statusMessage = "Speaker model not loaded yet"
+                    } else {
+                        self.errorMessage = Self.message(for: error)
+                        self.statusMessage = "Speaker labels unavailable"
+                    }
+                }
                 throw error
             }
         }
         loadTask = task
-
-        do {
-            let engine = try await task.value
-            if self.engine == nil {
-                self.engine = engine
-            }
-            isModelLoaded = true
-            loadTask = nil
-            return engine
-        } catch {
-            loadTask = nil
-            throw error
+        isModelLoading = true
+        errorMessage = nil
+        if !isPreparing {
+            statusMessage = "Loading speaker model…"
         }
+
+        return try await task.value
     }
 
     /// Stops inference, flushes the final audio, and keeps the last labels on
@@ -463,6 +595,32 @@ final class SpeakerDiarizationService {
         }
     }
 
+    /// Releases the loaded model and deletes FluidAudio's Sortformer cache so
+    /// the next session downloads and compiles it again.
+    func clearModelCache() async {
+        guard !isRunning, !isPreparing, !isModelLoading else { return }
+
+        if let engine {
+            await engine.release()
+        }
+        engine = nil
+        loadedPreset = nil
+        isModelLoaded = false
+        downloadProgress = nil
+        errorMessage = nil
+        statusMessage = "Speaker model not loaded yet"
+
+        let directory = Self.modelCacheDirectory()
+        await Task.detached(priority: .utility) {
+            try? FileManager.default.removeItem(at: directory)
+        }.value
+    }
+
+    private static func modelCacheDirectory() -> URL {
+        FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("FluidAudio/Models/sortformer", isDirectory: true)
+    }
+
     /// Returns the diarizer slot that overlaps `range` the most.
     ///
     /// When diarization has not caught up with a phrase yet, the nearest
@@ -498,7 +656,8 @@ final class SpeakerDiarizationService {
 
         let midpoint = (range.lowerBound + range.upperBound) / 2
         let nearest = segments.min { gap(from: $0, to: midpoint) < gap(from: $1, to: midpoint) }
-        if let nearest, gap(from: nearest, to: midpoint) <= 1.5 {
+        let gracePeriod = min(max(sessionTuning.labelGracePeriod, 0), 5)
+        if let nearest, gap(from: nearest, to: midpoint) <= gracePeriod {
             return nearest.speakerKey
         }
         return lastSpeakerKey
@@ -538,7 +697,7 @@ final class SpeakerDiarizationService {
     }
 
     private func apply(_ progress: DownloadProgress) {
-        guard isPreparing else { return }
+        guard isPreparing || isModelLoading else { return }
         downloadProgress = progress.fractionCompleted
 
         switch progress.phase {

@@ -157,7 +157,7 @@ struct ContentView: View {
                         .font(.callout.weight(.semibold))
                         .fixedSize(horizontal: false, vertical: true)
 
-                    if tester.isSpeakerDiarizationPreparing,
+                    if tester.isSpeakerDiarizationBusy,
                        let progress = tester.speakerDiarizationProgress {
                         Text("\(Int(progress * 100))%")
                             .font(.caption.monospacedDigit())
@@ -166,7 +166,7 @@ struct ContentView: View {
 
                     Spacer(minLength: 0)
 
-                    if tester.isSpeakerDiarizationReady {
+                    if tester.isSpeakerDiarizationReady, !tester.isSpeakerDiarizationBusy {
                         Text("READY")
                             .font(.caption2.weight(.bold))
                             .foregroundStyle(.green)
@@ -176,7 +176,7 @@ struct ContentView: View {
                     }
                 }
 
-                if tester.isSpeakerDiarizationPreparing {
+                if tester.isSpeakerDiarizationBusy {
                     if let progress = tester.speakerDiarizationProgress {
                         ProgressView(value: progress)
                             .tint(diarizationStatusColor)
@@ -207,7 +207,7 @@ struct ContentView: View {
         if tester.speakerDiarizationError != nil {
             return "exclamationmark.triangle.fill"
         }
-        if tester.isSpeakerDiarizationPreparing {
+        if tester.isSpeakerDiarizationBusy {
             return "arrow.down.circle.fill"
         }
         if tester.isSpeakerDiarizationReady {
@@ -220,7 +220,7 @@ struct ContentView: View {
         if tester.speakerDiarizationError != nil {
             return .orange
         }
-        if tester.isSpeakerDiarizationPreparing {
+        if tester.isSpeakerDiarizationBusy {
             return .blue
         }
         if tester.isSpeakerDiarizationReady {
@@ -420,7 +420,7 @@ struct ContentView: View {
         if tester.isSpeakerDiarizationRunning {
             return .green
         }
-        if tester.isSpeakerDiarizationPreparing {
+        if tester.isSpeakerDiarizationBusy {
             return .blue
         }
         return .secondary
@@ -447,6 +447,7 @@ struct ContentView: View {
 private struct ConfigurationPanel: View {
     @Bindable var tester: TesterViewModel
     @Binding var isExpanded: Bool
+    @State private var showDiarizationTuning = false
 
     var body: some View {
         PanelCard(title: "Configuration", systemImage: "slider.horizontal.3") {
@@ -455,6 +456,8 @@ private struct ConfigurationPanel: View {
                     transcriptionSpeedSection
                     Divider()
                     speakerLabelsSection
+                    Divider()
+                    diarizationTuningSection
                     Divider()
                     llmSpeedSection
                     Divider()
@@ -527,7 +530,7 @@ private struct ConfigurationPanel: View {
                     .font(.caption)
                     .foregroundStyle(tester.speakerDiarizationError == nil ? Color.secondary : Color.orange)
 
-                if tester.isSpeakerDiarizationPreparing,
+                if tester.isSpeakerDiarizationBusy,
                    let progress = tester.speakerDiarizationProgress {
                     ProgressView(value: progress)
                         .frame(width: 90)
@@ -542,6 +545,154 @@ private struct ConfigurationPanel: View {
 
             Text("Up to four speakers. The first session downloads roughly 100–250 MB of speaker models. Turning labels off hides them immediately; diarization starts with the next listening session.")
                 .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+    }
+
+    private var diarizationTuningSection: some View {
+        DisclosureGroup(isExpanded: $showDiarizationTuning) {
+            VStack(alignment: .leading, spacing: 14) {
+                Text("Applied when you start listening. These settings only affect speaker labels; Apple Speech still handles transcription.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("Model preset")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+
+                    Picker("Model preset", selection: $tester.diarizationTuning.preset) {
+                        ForEach(DiarizationModelPreset.allCases) { preset in
+                            Text(preset.title).tag(preset)
+                        }
+                    }
+                    .pickerStyle(.segmented)
+                    .labelsHidden()
+
+                    Text(tester.diarizationTuning.preset.summary)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+
+                    Text("Changing the preset loads a different model bundle on the next session.")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
+
+                Divider()
+
+                tuningSlider(
+                    title: "Speaker sensitivity",
+                    value: $tester.diarizationTuning.sensitivity,
+                    range: 0...1,
+                    step: 0.05,
+                    valueText: "\(Int(tester.diarizationTuning.sensitivity * 100))%",
+                    help: "Higher reacts to speaker changes sooner but may over-split."
+                )
+
+                tuningSlider(
+                    title: "Merge pauses under",
+                    value: $tester.diarizationTuning.minGapSeconds,
+                    range: 0...1.5,
+                    step: 0.05,
+                    valueText: String(format: "%.2f s", tester.diarizationTuning.minGapSeconds),
+                    help: "Short gaps below this are treated as one speaker turn."
+                )
+
+                tuningSlider(
+                    title: "Ignore blips under",
+                    value: $tester.diarizationTuning.minSegmentSeconds,
+                    range: 0...0.8,
+                    step: 0.05,
+                    valueText: String(format: "%.2f s", tester.diarizationTuning.minSegmentSeconds),
+                    help: "Very short speech bursts are discarded."
+                )
+
+                tuningSlider(
+                    title: "Label grace period",
+                    value: $tester.diarizationTuning.labelGracePeriod,
+                    range: 0...4,
+                    step: 0.1,
+                    valueText: String(format: "%.1f s", tester.diarizationTuning.labelGracePeriod),
+                    help: "How far away a speaker segment can be while still labeling a phrase."
+                )
+
+                Toggle(isOn: $tester.diarizationTuning.debugLogging) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Debug logging")
+                        Text("Writes extra FluidAudio diagnostics to the console.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+
+                Divider()
+
+                HStack {
+                    Button("Reset to defaults") {
+                        tester.resetDiarizationTuning()
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+
+                    Spacer(minLength: 12)
+
+                    Button(role: .destructive) {
+                        Task { await tester.clearSpeakerModelCache() }
+                    } label: {
+                        Label("Clear cached model", systemImage: "trash")
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                    .disabled(!tester.canClearSpeakerModelCache)
+                }
+
+                if tester.canClearSpeakerModelCache {
+                    Text("Deletes the downloaded speaker model. The next session downloads it again.")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                } else {
+                    Text("Stop listening before clearing the cached model.")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .padding(.top, 8)
+        } label: {
+            HStack {
+                Label("Diarization tuning", systemImage: "slider.horizontal.3")
+                    .font(.subheadline.weight(.semibold))
+
+                Spacer(minLength: 8)
+
+                Text(tester.diarizationTuning.preset.title)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    private func tuningSlider(
+        title: String,
+        value: Binding<Double>,
+        range: ClosedRange<Double>,
+        step: Double,
+        valueText: String,
+        help: String
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(spacing: 10) {
+                Text(title)
+                    .frame(width: 145, alignment: .leading)
+
+                Slider(value: value, in: range, step: step)
+
+                Text(valueText)
+                    .font(.caption.monospacedDigit())
+                    .frame(width: 56, alignment: .trailing)
+            }
+
+            Text(help)
+                .font(.caption2)
                 .foregroundStyle(.secondary)
         }
     }

@@ -9,6 +9,7 @@ final class TesterViewModel {
 
     private static let instructionsDefaultsKey = "systemInstructions"
     private static let speakerLabelsDefaultsKey = "speakerLabelsEnabled"
+    private static let diarizationTuningDefaultsKey = "diarizationTuning"
 
     private static let defaultInstructions = """
     You are a helpful assistant running inside a live speech transcription tester. \
@@ -37,6 +38,15 @@ final class TesterViewModel {
         }
     }
 
+    /// Model preset, sensitivity, smoothing, and label fallback tuning.
+    /// Persisted as JSON in `UserDefaults`.
+    var diarizationTuning: DiarizationTuning {
+        didSet {
+            guard let data = try? JSONEncoder().encode(diarizationTuning) else { return }
+            UserDefaults.standard.set(data, forKey: Self.diarizationTuningDefaultsKey)
+        }
+    }
+
     init() {
         instructions = UserDefaults.standard.string(forKey: Self.instructionsDefaultsKey)
             ?? Self.defaultInstructions
@@ -46,6 +56,13 @@ final class TesterViewModel {
         ) as? Bool ?? true
         speakerLabelsEnabled = savedSpeakerLabels
         transcriber.usesSpeakerLabels = savedSpeakerLabels
+
+        if let data = UserDefaults.standard.data(forKey: Self.diarizationTuningDefaultsKey),
+           let savedTuning = try? JSONDecoder().decode(DiarizationTuning.self, from: data) {
+            diarizationTuning = savedTuning
+        } else {
+            diarizationTuning = .default
+        }
     }
 
     /// Fast speech results appear sooner but may be less accurate. Applies
@@ -137,6 +154,14 @@ final class TesterViewModel {
         transcriber.diarization.isPreparing
     }
 
+    var isSpeakerDiarizationModelLoading: Bool {
+        transcriber.diarization.isModelLoading
+    }
+
+    var isSpeakerDiarizationBusy: Bool {
+        transcriber.diarization.isPreparing || transcriber.diarization.isModelLoading
+    }
+
     var isSpeakerDiarizationRunning: Bool {
         transcriber.diarization.isRunning
     }
@@ -145,7 +170,7 @@ final class TesterViewModel {
         if transcriber.diarization.errorMessage != nil {
             return "Speakers unavailable"
         }
-        if transcriber.diarization.isPreparing {
+        if isSpeakerDiarizationBusy {
             return "Speakers loading"
         }
         if transcriber.diarization.isRunning {
@@ -165,6 +190,9 @@ final class TesterViewModel {
         if transcriber.diarization.isPreparing {
             return transcriber.diarization.statusMessage
         }
+        if transcriber.diarization.isModelLoading {
+            return "Loading speaker model…"
+        }
         if transcriber.diarization.isRunning {
             return "Speaker labels on"
         }
@@ -178,7 +206,7 @@ final class TesterViewModel {
         if let error = transcriber.diarization.errorMessage {
             return error
         }
-        if transcriber.diarization.isPreparing {
+        if isSpeakerDiarizationBusy {
             return "One-time download and compile. The model is cached on this device for next time."
         }
         if transcriber.diarization.isRunning {
@@ -194,11 +222,27 @@ final class TesterViewModel {
         transcriber.diarization.isModelLoaded
     }
 
+    var canClearSpeakerModelCache: Bool {
+        !isListening
+            && !isPreparing
+            && !isSpeakerDiarizationBusy
+            && !transcriber.diarization.isRunning
+    }
+
     var canSendNow: Bool {
         !transcript.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && model.isAvailable
     }
 
+    func resetDiarizationTuning() {
+        diarizationTuning = .default
+    }
+
+    func clearSpeakerModelCache() async {
+        await transcriber.diarization.clearModelCache()
+    }
+
     func startListening() async {
+        transcriber.diarizationTuning = diarizationTuning
         await transcriber.start()
 
         if transcriber.isListening {

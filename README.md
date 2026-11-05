@@ -42,6 +42,28 @@ FluidAudio work for subsequent listening sessions; Apple's transcription
 pipeline is unaffected. A model already loaded from an earlier session stays
 cached in memory so a later restart is fast.
 
+### Diarization tuning
+
+**Configuration → Diarization tuning** exposes the knobs that are useful for
+experimenting without touching code:
+
+- **Model preset** — Fast, Balanced (default), or Efficient. Changing the
+  preset loads the matching model bundle on the next session (downloading it
+  the first time).
+- **Speaker sensitivity** — drives the Sortformer onset/offset thresholds.
+  Higher reacts sooner to speaker changes; lower is more conservative.
+- **Merge pauses under** — closes short gaps between same-speaker segments.
+- **Ignore blips under** — discards very short speech bursts.
+- **Label grace period** — how far away a speaker segment can be while still
+  labeling a phrase in the transcript.
+- **Debug logging** — extra FluidAudio diagnostics in the console.
+- **Reset to defaults** and **Clear cached model** — the latter deletes the
+  downloaded Sortformer bundle and forces a fresh download next time.
+
+Tuning values persist in `UserDefaults` and apply when you next start
+listening. Timeline-only changes reuse the loaded model; changing the preset
+loads a different model.
+
 ## Requirements
 
 - Xcode 27.3 or later.
