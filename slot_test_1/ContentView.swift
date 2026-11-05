@@ -9,6 +9,7 @@ import UIKit
 struct ContentView: View {
     @State private var tester = TesterViewModel()
     @State private var showSettings = false
+    @State private var showHistory = false
     @Environment(\.scenePhase) private var scenePhase
     @Environment(\.openURL) private var openURL
 
@@ -51,6 +52,9 @@ struct ContentView: View {
             } else if phase == .active {
                 tester.refreshModelAvailability()
             }
+        }
+        .sheet(isPresented: $showHistory) {
+            LLMHistoryView(client: tester.model)
         }
     }
 
@@ -131,6 +135,7 @@ struct ContentView: View {
             HStack(spacing: 10) {
                 primaryButton
                 sendButton(compact: false)
+                historyButton(compact: false)
                 clearButton(compact: false)
                 Spacer(minLength: 0)
             }
@@ -138,6 +143,7 @@ struct ContentView: View {
             HStack(spacing: 10) {
                 primaryButton
                 sendButton(compact: true)
+                historyButton(compact: true)
                 clearButton(compact: true)
                 Spacer(minLength: 0)
             }
@@ -273,6 +279,31 @@ struct ContentView: View {
         .controlSize(.large)
         .disabled(!tester.canSendNow || tester.isPreparing)
         .accessibilityLabel("Send pending speech to the ledger")
+    }
+
+    private func historyButton(compact: Bool) -> some View {
+        Button {
+            showHistory = true
+        } label: {
+            HStack(spacing: 6) {
+                Image(systemName: "clock.arrow.circlepath")
+
+                if !compact {
+                    Text("History")
+                }
+
+                if !tester.model.history.isEmpty {
+                    Text("\(tester.model.history.count)")
+                        .font(.caption2.monospacedDigit())
+                        .padding(.horizontal, 5)
+                        .padding(.vertical, 1)
+                        .background(.secondary.opacity(0.15), in: Capsule())
+                }
+            }
+        }
+        .buttonStyle(.bordered)
+        .controlSize(.large)
+        .accessibilityLabel("Model call history")
     }
 
     private func clearButton(compact: Bool) -> some View {
@@ -924,6 +955,242 @@ private struct PulsingDot: View {
                 }
             }
             .accessibilityLabel("Live")
+    }
+}
+
+// MARK: - Model call history
+
+private struct LLMHistoryView: View {
+    let client: FoundationModelClient
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        NavigationStack {
+            Group {
+                if client.history.isEmpty {
+                    ContentUnavailableView(
+                        "No model calls yet",
+                        systemImage: "clock",
+                        description: Text("Every prompt sent to the on-device model appears here for this session.")
+                    )
+                } else {
+                    List(Array(client.history.reversed())) { call in
+                        NavigationLink(value: call.id) {
+                            LLMHistoryRow(call: call)
+                        }
+                    }
+                    .listStyle(.plain)
+                }
+            }
+            .navigationTitle("Model Calls")
+            #if os(iOS)
+            .navigationBarTitleDisplayMode(.inline)
+            #endif
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Done") { dismiss() }
+                }
+                ToolbarItem(placement: .primaryAction) {
+                    Button("Clear", role: .destructive) {
+                        client.clearHistory()
+                    }
+                    .disabled(client.history.isEmpty)
+                }
+            }
+            .navigationDestination(for: UUID.self) { id in
+                LLMHistoryDetail(client: client, callID: id)
+            }
+        }
+    }
+}
+
+private struct LLMHistoryRow: View {
+    let call: LLMCallRecord
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 5) {
+            HStack(spacing: 6) {
+                Circle()
+                    .fill(statusColor)
+                    .frame(width: 8, height: 8)
+
+                Text(call.label)
+                    .font(.callout.weight(.semibold))
+                    .lineLimit(1)
+
+                Spacer(minLength: 8)
+
+                Text(call.startedAt, format: .dateTime.hour().minute().second())
+                    .font(.caption.monospacedDigit())
+                    .foregroundStyle(.secondary)
+            }
+
+            Text(call.preview)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .lineLimit(2)
+
+            HStack(spacing: 10) {
+                Text(call.statusText)
+
+                if let duration = call.duration {
+                    Text("\(duration, specifier: "%.1f") s")
+                }
+
+                Text("\(call.prompt.count + call.instructions.count) chars")
+            }
+            .font(.caption2)
+            .foregroundStyle(.tertiary)
+        }
+        .padding(.vertical, 3)
+    }
+
+    private var statusColor: Color {
+        if call.isInProgress { return .blue }
+        if call.wasCancelled { return .orange }
+        if call.errorMessage != nil { return .red }
+        return .green
+    }
+}
+
+private struct LLMHistoryDetail: View {
+    let client: FoundationModelClient
+    let callID: UUID
+
+    private var call: LLMCallRecord? {
+        client.history.first { $0.id == callID }
+    }
+
+    var body: some View {
+        Group {
+            if let call {
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 18) {
+                        metadata(call)
+
+                        section(
+                            "System instructions",
+                            text: call.instructions.isEmpty ? "(none)" : call.instructions
+                        )
+
+                        section("User prompt", text: call.prompt)
+
+                        section(
+                            "Output",
+                            text: call.output.isEmpty
+                                ? (call.isInProgress ? "Streaming…" : "(empty)")
+                                : call.output
+                        )
+
+                        if let note = call.note {
+                            noteView(note, color: .orange)
+                        }
+
+                        if let error = call.errorMessage {
+                            noteView(error, color: .red)
+                        }
+                    }
+                    .padding(20)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                .navigationTitle(call.label)
+                #if os(iOS)
+                .navigationBarTitleDisplayMode(.inline)
+                #endif
+                .toolbar {
+                    ToolbarItem(placement: .primaryAction) {
+                        Menu {
+                            Button("Copy full request") {
+                                copyToClipboard(call.fullRequest)
+                            }
+                            Button("Copy user prompt") {
+                                copyToClipboard(call.prompt)
+                            }
+                            Button("Copy output") {
+                                copyToClipboard(call.output)
+                            }
+                            .disabled(call.output.isEmpty && call.isInProgress)
+                        } label: {
+                            Image(systemName: "doc.on.doc")
+                        }
+                    }
+                }
+            } else {
+                Text("This call is no longer in the history.")
+                    .foregroundStyle(.secondary)
+                    .padding()
+            }
+        }
+    }
+
+    private func metadata(_ call: LLMCallRecord) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 8) {
+                Text(call.statusText)
+                    .font(.caption.weight(.semibold))
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 3)
+                    .background(statusColor(call).opacity(0.15), in: Capsule())
+                    .foregroundStyle(statusColor(call))
+
+                if let duration = call.duration {
+                    Text("\(duration, specifier: "%.1f") s")
+                        .font(.caption.monospacedDigit())
+                        .foregroundStyle(.secondary)
+                }
+
+                Spacer(minLength: 0)
+
+                Text(call.startedAt, format: .dateTime.hour().minute().second())
+                    .font(.caption.monospacedDigit())
+                    .foregroundStyle(.secondary)
+            }
+
+            Text("\(call.options) · \(call.instructions.count) instruction chars · \(call.prompt.count) prompt chars")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+
+            Text("The model receives the system instructions when the session is created and the user prompt as the message.")
+                .font(.caption2)
+                .foregroundStyle(.tertiary)
+        }
+    }
+
+    private func statusColor(_ call: LLMCallRecord) -> Color {
+        if call.isInProgress { return .blue }
+        if call.wasCancelled { return .orange }
+        if call.errorMessage != nil { return .red }
+        return .green
+    }
+
+    private func section(_ title: String, text: String) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text(title.uppercased())
+                .font(.caption2.weight(.semibold))
+                .foregroundStyle(.secondary)
+
+            Text(text)
+                .font(.system(.caption, design: .monospaced))
+                .textSelection(.enabled)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(10)
+                .background(
+                    Color.primary.opacity(0.05),
+                    in: RoundedRectangle(cornerRadius: 8, style: .continuous)
+                )
+        }
+    }
+
+    private func noteView(_ text: String, color: Color) -> some View {
+        Text(text)
+            .font(.caption)
+            .foregroundStyle(color)
+            .padding(10)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(
+                color.opacity(0.10),
+                in: RoundedRectangle(cornerRadius: 8, style: .continuous)
+            )
     }
 }
 

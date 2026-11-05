@@ -45,6 +45,55 @@ enum ModelReasoningLevel: String, CaseIterable, Identifiable {
     }
 }
 
+/// One request sent to the on-device model. Session-only; never persisted.
+struct LLMCallRecord: Identifiable {
+    let id = UUID()
+    let startedAt: Date
+    let label: String
+    let instructions: String
+    let prompt: String
+    let options: String
+    var output = ""
+    var note: String?
+    var errorMessage: String?
+    var finishedAt: Date?
+    var wasCancelled = false
+
+    var isInProgress: Bool { finishedAt == nil }
+
+    var duration: TimeInterval? {
+        guard let finishedAt else { return nil }
+        return finishedAt.timeIntervalSince(startedAt)
+    }
+
+    var fullRequest: String {
+        let system = instructions.isEmpty ? "(no system instructions)" : instructions
+        return """
+        SYSTEM INSTRUCTIONS
+        \(system)
+
+        USER PROMPT
+        \(prompt)
+        """
+    }
+
+    /// Last non-empty line of the prompt, which is the newest speech for an
+    /// update and the tail of the ledger for a compaction.
+    var preview: String {
+        prompt
+            .split(whereSeparator: \.isNewline)
+            .last(where: { !$0.trimmingCharacters(in: .whitespaces).isEmpty })
+            .map(String.init) ?? prompt
+    }
+
+    var statusText: String {
+        if isInProgress { return "In progress" }
+        if wasCancelled { return "Cancelled" }
+        if errorMessage != nil { return "Failed" }
+        return "Succeeded"
+    }
+}
+
 /// Folds finalized speech into a running medical ledger using Apple's
 /// on-device Foundation Model.
 ///
@@ -60,6 +109,9 @@ final class FoundationModelClient {
     private(set) var isResponding = false
     private(set) var errorMessage: String?
     private(set) var availability = SystemLanguageModel.default.availability
+
+    /// Every model call made during this app session, in order. Not persisted.
+    private(set) var history: [LLMCallRecord] = []
 
     /// Whether the selected model supports reasoning levels. The on-device
     /// model does not; reasoning is currently a Private Cloud Compute feature.
@@ -149,6 +201,8 @@ final class FoundationModelClient {
         errorMessage = nil
 
         let baseline = previousLedger.trimmingCharacters(in: .whitespacesAndNewlines)
+        let sessionInstructions = instructions
+            .trimmingCharacters(in: .whitespacesAndNewlines)
         // Drop any partial ledger from an interrupted stream.
         output = baseline
 
@@ -177,7 +231,7 @@ final class FoundationModelClient {
                 if forceCompaction || ledger.count > Self.ledgerCharacterBudget {
                     if let compacted = await self.compactLedger(
                         ledger,
-                        instructions: instructions,
+                        instructions: sessionInstructions,
                         requestID: requestID
                     ) {
                         ledger = compacted
@@ -193,8 +247,22 @@ final class FoundationModelClient {
                     preserveAllBullets: didRetryAfterShrink
                 )
 
+                let callLabel: String
+                if didRetryAfterShrink {
+                    callLabel = "Ledger update — preserve-bullets retry"
+                } else if didRetryAfterOverflow {
+                    callLabel = "Ledger update — overflow retry"
+                } else {
+                    callLabel = "Ledger update"
+                }
+                let callID = self.beginCall(
+                    label: callLabel,
+                    instructions: sessionInstructions,
+                    prompt: prompt
+                )
+
                 do {
-                    let session = self.makeSession(instructions: instructions)
+                    let session = self.makeSession(instructions: sessionInstructions)
                     let stream = session.streamResponse(
                         to: prompt,
                         contextOptions: self.contextOptions()
@@ -207,11 +275,17 @@ final class FoundationModelClient {
                         }
                         isFirstUpdate = false
 
-                        guard !Task.isCancelled, self.activeRequestID == requestID else { return }
+                        guard !Task.isCancelled, self.activeRequestID == requestID else {
+                            self.finishCall(callID, output: self.output, cancelled: true)
+                            return
+                        }
                         self.output = snapshot.content
                     }
 
-                    guard !Task.isCancelled, self.activeRequestID == requestID else { return }
+                    guard !Task.isCancelled, self.activeRequestID == requestID else {
+                        self.finishCall(callID, output: self.output, cancelled: true)
+                        return
+                    }
 
                     let newLedger = self.output
                         .trimmingCharacters(in: .whitespacesAndNewlines)
@@ -219,6 +293,11 @@ final class FoundationModelClient {
                         // Never replace a real ledger with an empty response.
                         self.output = ledger
                         self.errorMessage = "The model returned an empty ledger."
+                        self.finishCall(
+                            callID,
+                            output: "",
+                            error: "The model returned an empty ledger."
+                        )
                         return
                     }
 
@@ -233,13 +312,22 @@ final class FoundationModelClient {
                        !didRetryAfterShrink {
                         didRetryAfterShrink = true
                         self.output = ledger
+                        self.finishCall(
+                            callID,
+                            output: newLedger,
+                            note: "Rejected: dropped more than 25% of the previous bullets."
+                        )
                         continue
                     }
 
+                    self.finishCall(callID, output: newLedger)
                     succeeded = true
                     return
                 } catch {
-                    guard !Task.isCancelled, self.activeRequestID == requestID else { return }
+                    guard !Task.isCancelled, self.activeRequestID == requestID else {
+                        self.finishCall(callID, output: self.output, cancelled: true)
+                        return
+                    }
 
                     if let languageModelError = error as? LanguageModelError,
                        case .contextSizeExceeded = languageModelError,
@@ -247,13 +335,22 @@ final class FoundationModelClient {
                         // Compact and retry once with a smaller ledger.
                         didRetryAfterOverflow = true
                         forceCompaction = true
+                        let partial = self.output
                         self.output = ledger
+                        self.finishCall(
+                            callID,
+                            output: partial,
+                            note: "Context limit hit; retrying with a compacted ledger."
+                        )
                         continue
                     }
 
-                    self.output = baseline
-                    self.errorMessage = (error as? LocalizedError)?.errorDescription
+                    let message = (error as? LocalizedError)?.errorDescription
                         ?? error.localizedDescription
+                    let partial = self.output
+                    self.output = baseline
+                    self.errorMessage = message
+                    self.finishCall(callID, output: partial, error: message)
                     return
                 }
             }
@@ -271,6 +368,47 @@ final class FoundationModelClient {
         cancel()
         output = ""
         errorMessage = nil
+    }
+
+    func clearHistory() {
+        history.removeAll()
+    }
+
+    // MARK: - Call history
+
+    private func beginCall(
+        label: String,
+        instructions: String,
+        prompt: String
+    ) -> UUID {
+        let record = LLMCallRecord(
+            startedAt: .now,
+            label: label,
+            instructions: instructions,
+            prompt: prompt,
+            options: supportsReasoning
+                ? "Reasoning: \(reasoningLevel.title)"
+                : "Reasoning: none (on-device)"
+        )
+        history.append(record)
+        return record.id
+    }
+
+    private func finishCall(
+        _ id: UUID,
+        output: String,
+        note: String? = nil,
+        error: String? = nil,
+        cancelled: Bool = false
+    ) {
+        guard let index = history.firstIndex(where: { $0.id == id }) else { return }
+        var record = history[index]
+        record.output = output
+        record.note = note
+        record.errorMessage = error
+        record.wasCancelled = cancelled
+        record.finishedAt = .now
+        history[index] = record
     }
 
     // MARK: - Request building
@@ -320,6 +458,13 @@ final class FoundationModelClient {
         \(ledger)
         """
 
+        let callID = beginCall(
+            label: "Ledger compaction",
+            instructions: instructions,
+            prompt: prompt
+        )
+        var compacted = ""
+
         do {
             let session = makeSession(instructions: instructions)
             let stream = session.streamResponse(
@@ -327,15 +472,25 @@ final class FoundationModelClient {
                 contextOptions: contextOptions()
             )
 
-            var compacted = ""
             for try await snapshot in stream {
-                guard !Task.isCancelled, activeRequestID == requestID else { return nil }
+                guard !Task.isCancelled, activeRequestID == requestID else {
+                    finishCall(callID, output: compacted, cancelled: true)
+                    return nil
+                }
                 compacted = snapshot.content
             }
 
             let trimmed = compacted.trimmingCharacters(in: .whitespacesAndNewlines)
+            finishCall(
+                callID,
+                output: trimmed,
+                note: trimmed.isEmpty ? "Empty compaction response." : nil
+            )
             return trimmed.isEmpty ? nil : trimmed
         } catch {
+            let message = (error as? LocalizedError)?.errorDescription
+                ?? error.localizedDescription
+            finishCall(callID, output: compacted, error: message)
             return nil
         }
     }

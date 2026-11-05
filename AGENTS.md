@@ -38,7 +38,9 @@ speaker diarization via FluidAudio.
   `SpeakerDiarizationService`) and speaker-label lookup.
 - `FoundationModelClient.swift` — stateless ledger updater: sends
   `previous ledger + new transcript` to `SystemLanguageModel` and streams back
-  the complete updated ledger. No session history is retained.
+  the complete updated ledger. No session history is retained. It also keeps an
+  in-memory `LLMCallRecord` log (prompts, outputs, errors) for the History
+  screen; that log is intentionally not persisted.
 
 Audio flow: one `installTap` feeds both the speech analyzer (via
 `AnalyzerInputConverter`) and `DiarizationAudioCapture`, which resamples to
@@ -70,6 +72,9 @@ actor, which forwards samples to the engine actor for inference.
   is only written when the text differs from the bundled default, so a rebuild
   after editing `DefaultSystemPrompt.md` is picked up unless the user typed a
   custom prompt (**Reset to default** clears it).
+- Model-call history (`LLMCallRecord`) is in-memory only, held by
+  `FoundationModelClient.history`. It is not a `UserDefaults` key and is lost
+  when the app exits.
 - Signing is already configured: automatic, `DEVELOPMENT_TEAM = XHV2GLB6KY`,
   bundle id `com.michaelpocialikpersonalteam.slottest1`.
 

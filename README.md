@@ -16,6 +16,8 @@ Apple's on-device Foundation Model.
 - Folds each batch of finalized speech into a running medical ledger every 5 seconds (configurable from 1–15 seconds).
 - Keeps the ledger as the conversation state, so earlier speech and replies survive without an unbounded session history.
 - Streams the model's response back to the screen token by token.
+- Logs every model call for the current app session so you can inspect the exact
+  system instructions, user prompt, output, and failures.
 - Provides "Send Now", "Clear", copy buttons, and editable system instructions
   that persist across launches.
 
@@ -121,6 +123,24 @@ Behavior worth knowing:
 Because the default prompt asks for the complete ledger on every turn, the
 cadence is a real tradeoff: a 10–15 second interval keeps the per-update prompt
 smaller and is usually enough for a scribe that is reviewed after the call.
+
+## Call history
+
+The **History** button opens a list of every request sent to the model during
+the app session. Each row shows the call type, time, duration, status, and a
+preview. Opening a call shows:
+
+- The exact system instructions and user prompt strings passed to
+  `LanguageModelSession`.
+- The streamed output (or the partial output if the call was cancelled).
+- Any retry note or error message.
+- Copy actions for the full request, the user prompt, and the output.
+
+The log includes ledger updates, retries, and ledger-compaction calls, and it is
+kept in memory only. It is not written to `UserDefaults` and disappears when the
+app quits. **Clear** in the history screen empties it; the main **Clear** button
+does not, so starting a new call leaves the previous call's calls inspectable
+until the app exits.
 
 ## Requirements
 

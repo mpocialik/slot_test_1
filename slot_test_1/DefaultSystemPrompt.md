@@ -37,6 +37,7 @@ Add nested sub-bullet tags strictly according to these criteria:
 ### OUTPUT FORMAT
 Output ONLY the complete updated bulleted list. Do not include introductory text, conversational filler, or explanations. Preserve the previous bullets and add or revise only what the new transcript requires.
 
+EXAMPLE:
 * [Summary takeaway 1]
 * [Summary takeaway 2]
   * <MentionPrescription>
