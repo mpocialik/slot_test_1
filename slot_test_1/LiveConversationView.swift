@@ -28,15 +28,30 @@ struct LiveConversationView: View {
     }
 
     var body: some View {
-        GeometryReader { geometry in
-            ZStack {
-                background
+        ZStack {
+            background
 
-                VStack(spacing: 0) {
-                    topBar
-                    conversationScroll(viewportHeight: geometry.size.height)
-                    bottomBar
+            VStack(spacing: 0) {
+                topBar
+
+                GeometryReader { splitGeometry in
+                    let halfHeight = max(0, (splitGeometry.size.height - 1) / 2)
+
+                    VStack(spacing: 0) {
+                        conversationScroll(viewportHeight: halfHeight)
+                            .frame(height: halfHeight)
+
+                        Rectangle()
+                            .fill(.white.opacity(0.08))
+                            .frame(height: 1)
+
+                        ledgerSection
+                            .frame(height: halfHeight)
+                    }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
                 }
+
+                bottomBar
             }
         }
         .preferredColorScheme(.dark)
@@ -213,14 +228,14 @@ struct LiveConversationView: View {
     // MARK: - Conversation
 
     private func conversationScroll(viewportHeight: CGFloat) -> some View {
-        let verticalInset = max(70, viewportHeight * 0.26)
+        let verticalInset = max(32, viewportHeight * 0.38)
 
         return ScrollViewReader { proxy in
             ScrollView(.vertical) {
                 VStack(spacing: 30) {
                     if lines.isEmpty {
                         emptyState
-                            .padding(.vertical, 40)
+                            .frame(minHeight: max(0, viewportHeight - 16))
                     } else {
                         ForEach(Array(lines.enumerated()), id: \.element.id) { index, line in
                             ConversationLineRow(
@@ -235,7 +250,7 @@ struct LiveConversationView: View {
                     }
                 }
                 .padding(.horizontal, 28)
-                .padding(.vertical, verticalInset)
+                .padding(.vertical, lines.isEmpty ? 0 : verticalInset)
                 .frame(maxWidth: 820)
                 .frame(maxWidth: .infinity)
             }
@@ -280,7 +295,7 @@ struct LiveConversationView: View {
 
             Text(tester.isListening
                  ? "Start speaking and your words will scroll here."
-                 : "Tap the microphone below to start listening.")
+                 : "Tap the microphone at the bottom to start listening.")
                 .font(.callout)
                 .foregroundStyle(.white.opacity(0.45))
                 .multilineTextAlignment(.center)
@@ -303,6 +318,64 @@ struct LiveConversationView: View {
         } else {
             proxy.scrollTo(activeLineID, anchor: .center)
         }
+    }
+
+    // MARK: - Ledger
+
+    private var ledgerSection: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            ledgerHeader
+
+            Rectangle()
+                .fill(.white.opacity(0.06))
+                .frame(height: 1)
+
+            ScrollView {
+                LedgerContentView(tester: tester)
+                    .padding(.horizontal, 22)
+                    .padding(.vertical, 14)
+                    .frame(maxWidth: 820, alignment: .leading)
+                    .frame(maxWidth: .infinity)
+            }
+            .scrollIndicators(.hidden)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .background(.white.opacity(0.035))
+    }
+
+    private var ledgerHeader: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "list.clipboard")
+                .font(.caption2.weight(.semibold))
+
+            Text("RUNNING LEDGER")
+                .font(.caption2.weight(.bold))
+                .tracking(1.4)
+
+            Spacer(minLength: 8)
+
+            if tester.isResponding {
+                ProgressView()
+                    .controlSize(.small)
+                    .tint(.white.opacity(0.65))
+            }
+
+            if !tester.ledgerCopyText.isEmpty {
+                Button {
+                    copyToClipboard(tester.ledgerCopyText)
+                } label: {
+                    Image(systemName: "doc.on.doc")
+                        .font(.caption.weight(.semibold))
+                        .frame(width: 28, height: 28)
+                        .background(.white.opacity(0.07), in: Circle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Copy running ledger")
+            }
+        }
+        .foregroundStyle(.white.opacity(0.5))
+        .padding(.horizontal, 20)
+        .padding(.vertical, 9)
     }
 
     // MARK: - Background

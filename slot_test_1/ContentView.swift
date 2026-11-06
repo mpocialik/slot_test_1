@@ -411,37 +411,7 @@ struct ContentView: View {
             showsProgress: tester.isResponding,
             copyText: tester.ledgerCopyText
         ) {
-            VStack(alignment: .leading, spacing: 10) {
-                if tester.hasRequestTags {
-                    HStack(spacing: 8) {
-                        if tester.prescriptionRequestDetected {
-                            StatusPill(
-                                text: "Rx request",
-                                systemImage: "pills.fill",
-                                color: .blue
-                            )
-                        }
-
-                        if tester.appointmentRequestDetected {
-                            StatusPill(
-                                text: "Appointment request",
-                                systemImage: "calendar.badge.plus",
-                                color: .purple
-                            )
-                        }
-                    }
-                }
-
-                if tester.modelOutput.isEmpty {
-                    Text(tester.isResponding
-                         ? "Updating ledger…"
-                         : responsePlaceholder)
-                        .foregroundStyle(.secondary)
-                } else {
-                    Text(tester.modelOutput)
-                        .textSelection(.enabled)
-                }
-            }
+            LedgerContentView(tester: tester)
         }
         .frame(minHeight: 170, alignment: .top)
     }
@@ -539,13 +509,6 @@ struct ContentView: View {
             return .blue
         }
         return .secondary
-    }
-
-    private var responsePlaceholder: String {
-        if tester.autoSendEnabled {
-            return "New finalized speech is folded into the ledger every \(Int(tester.cadenceSeconds)) seconds."
-        }
-        return "Tap Send Now to fold pending speech into the ledger."
     }
 
     private var systemSettingsURL: URL? {
@@ -902,6 +865,51 @@ private struct StatusPill: View {
     }
 }
 
+/// The request tags and ledger text, without any surrounding card. Shared by
+/// the main Running Ledger panel and the full-screen conversation view.
+struct LedgerContentView: View {
+    let tester: TesterViewModel
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            if tester.hasRequestTags {
+                HStack(spacing: 8) {
+                    if tester.prescriptionRequestDetected {
+                        StatusPill(
+                            text: "Rx request",
+                            systemImage: "pills.fill",
+                            color: .blue
+                        )
+                    }
+
+                    if tester.appointmentRequestDetected {
+                        StatusPill(
+                            text: "Appointment request",
+                            systemImage: "calendar.badge.plus",
+                            color: .purple
+                        )
+                    }
+                }
+            }
+
+            if tester.modelOutput.isEmpty {
+                Text(tester.isResponding ? "Updating ledger…" : placeholder)
+                    .foregroundStyle(.secondary)
+            } else {
+                Text(tester.modelOutput)
+                    .textSelection(.enabled)
+            }
+        }
+    }
+
+    private var placeholder: String {
+        if tester.autoSendEnabled {
+            return "New finalized speech is folded into the ledger every \(Int(tester.cadenceSeconds)) seconds."
+        }
+        return "Tap Send Now to fold pending speech into the ledger."
+    }
+}
+
 private struct PanelCard<Content: View>: View {
     let title: String
     let systemImage: String
@@ -1249,7 +1257,7 @@ private struct ConversationPresentationModifier: ViewModifier {
     }
 }
 
-private func copyToClipboard(_ text: String) {
+func copyToClipboard(_ text: String) {
     #if os(macOS)
     NSPasteboard.general.clearContents()
     NSPasteboard.general.setString(text, forType: .string)

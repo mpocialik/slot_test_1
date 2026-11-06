@@ -21,11 +21,13 @@ speaker diarization via FluidAudio.
 ## Architecture
 
 - `MyApp.swift` — `@main` entrypoint.
-- `ContentView.swift` — all UI in one file.
-- `LiveConversationView.swift` — full-screen, karaoke-style transcript:
-  centered auto-scrolling lines, word-by-word fill for volatile text, and
-  colored speaker labels. Presented from the **Conversation** button in the
-  main controls.
+- `ContentView.swift` — main tester screen: controls, transcript, running
+  ledger (shared `LedgerContentView`), configuration, and history.
+- `LiveConversationView.swift` — full-screen, karaoke-style conversation view:
+  the top half is the centered auto-scrolling transcript with word-by-word
+  fill for volatile text and colored speaker labels; the bottom half is the
+  running ledger. Presented from the **Conversation** button in the main
+  controls.
 - `TesterViewModel.swift` — `@MainActor @Observable` orchestrator: owns the
   transcriber and model client, owns the committed ledger, tracks the finalized
   transcript cursor, persists the call-level request tags, and runs the

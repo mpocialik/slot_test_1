@@ -148,9 +148,10 @@ smaller and is usually enough for a scribe that is reviewed after the call.
 
 ## Live conversation
 
-The **Conversation** button opens a full-screen, Spotify/Apple-Music-style
-transcript view. It uses the same throttled, speaker-labeled text as the main
-transcript, so the display-lag and speaker-label settings apply there too.
+The **Conversation** button opens a full-screen view split into two equal
+halves. The top half is the live, Spotify/Apple-Music-style transcript; the
+bottom half is the running ledger. Both use the same data as the main screen,
+so the display-lag, speaker-label, and ledger settings apply there too.
 
 - The newest line sits near the center and scrolls there automatically.
 - Earlier lines dim and shrink; the active line stays bright.
@@ -158,6 +159,8 @@ transcript, so the display-lag and speaker-label settings apply there too.
   word by word at a reading pace. Finalized lines are fully lit.
 - A speaker change adds a colored `SPEAKER N` label above the line. Turn
   speaker labels off and the labels disappear here as well.
+- The bottom half shows the running ledger, request tags, and a copy button.
+  It scrolls independently of the conversation above.
 - The bottom bar can start or stop listening and send pending finalized speech
   to the ledger without leaving the view.
 
