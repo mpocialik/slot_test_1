@@ -232,7 +232,7 @@ struct LiveConversationView: View {
 
         return ScrollViewReader { proxy in
             ScrollView(.vertical) {
-                VStack(spacing: 30) {
+                VStack(spacing: 12) {
                     if lines.isEmpty {
                         emptyState
                             .frame(minHeight: max(0, viewportHeight - 16))
@@ -420,14 +420,14 @@ private struct ConversationLineRow: View {
     }
 
     var body: some View {
-        VStack(spacing: 10) {
+        VStack(spacing: 5) {
             if showsSpeaker, let number = line.speakerNumber {
                 Text("SPEAKER \(number)")
                     .font(.caption2.weight(.bold))
                     .tracking(1.1)
                     .foregroundStyle(speakerColor.opacity(isActive ? 1 : 0.6))
-                    .padding(.horizontal, 9)
-                    .padding(.vertical, 4)
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 3)
                     .background(speakerColor.opacity(isActive ? 0.18 : 0.09), in: Capsule())
                     .overlay {
                         Capsule()
@@ -436,14 +436,15 @@ private struct ConversationLineRow: View {
             }
 
             KaraokeLine(line: line, isActive: isActive, isLive: isLive)
-                .font(.system(size: 30, weight: .bold, design: .rounded))
-                .multilineTextAlignment(.center)
-                .lineSpacing(7)
+                .font(.system(size: 22, weight: .bold, design: .rounded))
+                .multilineTextAlignment(.leading)
+                .lineSpacing(2)
                 .shadow(color: .white.opacity(isActive ? 0.12 : 0), radius: 22)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .scaleEffect(isActive ? 1 : 0.94, anchor: .leading)
         }
         .frame(maxWidth: .infinity)
         .padding(.horizontal, 4)
-        .scaleEffect(isActive ? 1 : 0.94)
         .opacity(isActive ? 1 : 0.4)
         .blur(radius: isActive ? 0 : 0.3)
         .animation(.spring(response: 0.5, dampingFraction: 0.86), value: isActive)
