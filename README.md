@@ -11,6 +11,9 @@ Apple's on-device Foundation Model.
   [FluidAudio](https://github.com/FluidInference/FluidAudio) (NVIDIA Sortformer),
   rendering turns as “Speaker 1”, “Speaker 2”, and so on. Up to four speakers.
 - Shows volatile (in-progress) words as they are recognized and commits final results.
+- Opens a full-screen **Conversation** view that scrolls the live transcript like
+  a lyrics screen: the newest line stays centered and bright, the in-progress
+  line fills in word by word, and speaker changes get a colored label.
 - Lets you tune transcription speed with fast speech results and an artificial display lag.
 - Lets you tune model speed with a reasoning level.
 - Folds each batch of finalized speech into a running medical ledger every 5 seconds (configurable from 1–15 seconds), then runs a second pass that classifies prescription and appointment requests.
@@ -143,6 +146,21 @@ Because the default prompt asks for the complete ledger on every turn, the
 cadence is a real tradeoff: a 10–15 second interval keeps the per-update prompt
 smaller and is usually enough for a scribe that is reviewed after the call.
 
+## Live conversation
+
+The **Conversation** button opens a full-screen, Spotify/Apple-Music-style
+transcript view. It uses the same throttled, speaker-labeled text as the main
+transcript, so the display-lag and speaker-label settings apply there too.
+
+- The newest line sits near the center and scrolls there automatically.
+- Earlier lines dim and shrink; the active line stays bright.
+- While the recognizer is producing volatile text, the current line fills in
+  word by word at a reading pace. Finalized lines are fully lit.
+- A speaker change adds a colored `SPEAKER N` label above the line. Turn
+  speaker labels off and the labels disappear here as well.
+- The bottom bar can start or stop listening and send pending finalized speech
+  to the ledger without leaving the view.
+
 ## Call history
 
 The **History** button opens a list of every request sent to the model during
@@ -212,6 +230,7 @@ precision: palettized on iOS, fp16 on macOS).
 ## Files
 
 - `ContentView.swift` — UI
+- `LiveConversationView.swift` — full-screen conversation-style live transcript
 - `DefaultSystemPrompt.md` — pass-one ledger-update prompt
 - `DefaultClassificationPrompt.md` — pass-two classification prompt template
 - `TesterViewModel.swift` — ledger state, send loop, speed settings, and app state

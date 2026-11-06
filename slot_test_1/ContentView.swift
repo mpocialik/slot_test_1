@@ -10,6 +10,7 @@ struct ContentView: View {
     @State private var tester = TesterViewModel()
     @State private var showSettings = false
     @State private var showHistory = false
+    @State private var showConversation = false
     @Environment(\.scenePhase) private var scenePhase
     @Environment(\.openURL) private var openURL
 
@@ -56,6 +57,7 @@ struct ContentView: View {
         .sheet(isPresented: $showHistory) {
             LLMHistoryView(client: tester.model)
         }
+        .modifier(ConversationPresentationModifier(isPresented: $showConversation, tester: tester))
     }
 
     // MARK: - Sections
@@ -135,6 +137,7 @@ struct ContentView: View {
             HStack(spacing: 10) {
                 primaryButton
                 sendButton(compact: false)
+                conversationButton(compact: false)
                 historyButton(compact: false)
                 clearButton(compact: false)
                 Spacer(minLength: 0)
@@ -143,6 +146,16 @@ struct ContentView: View {
             HStack(spacing: 10) {
                 primaryButton
                 sendButton(compact: true)
+                conversationButton(compact: true)
+                historyButton(compact: true)
+                clearButton(compact: true)
+                Spacer(minLength: 0)
+            }
+
+            HStack(spacing: 8) {
+                compactPrimaryButton
+                sendButton(compact: true)
+                conversationButton(compact: true)
                 historyButton(compact: true)
                 clearButton(compact: true)
                 Spacer(minLength: 0)
@@ -265,6 +278,34 @@ struct ContentView: View {
         .disabled(tester.isPreparing)
     }
 
+    private var compactPrimaryButton: some View {
+        Button {
+            Task {
+                if tester.isListening {
+                    await tester.stopListening()
+                } else {
+                    await tester.startListening()
+                }
+            }
+        } label: {
+            Group {
+                if tester.isPreparing {
+                    ProgressView()
+                        .controlSize(.small)
+                        .tint(.white)
+                } else {
+                    Image(systemName: tester.isListening ? "stop.fill" : "mic.fill")
+                }
+            }
+            .frame(width: 22, height: 22)
+        }
+        .buttonStyle(.borderedProminent)
+        .tint(tester.isListening ? .red : .accentColor)
+        .controlSize(.large)
+        .disabled(tester.isPreparing)
+        .accessibilityLabel(tester.isListening ? "Stop Listening" : "Start Listening")
+    }
+
     private func sendButton(compact: Bool) -> some View {
         Button {
             tester.sendNow()
@@ -304,6 +345,22 @@ struct ContentView: View {
         .buttonStyle(.bordered)
         .controlSize(.large)
         .accessibilityLabel("Model call history")
+    }
+
+    private func conversationButton(compact: Bool) -> some View {
+        Button {
+            showConversation = true
+        } label: {
+            if compact {
+                Image(systemName: "bubble.left.and.bubble.right.fill")
+            } else {
+                Label("Conversation", systemImage: "bubble.left.and.bubble.right.fill")
+            }
+        }
+        .buttonStyle(.bordered)
+        .controlSize(.large)
+        .accessibilityLabel("Open live conversation")
+        .help("Show the live transcript as a scrolling conversation")
     }
 
     private func clearButton(compact: Bool) -> some View {
@@ -1169,6 +1226,26 @@ private struct LLMHistoryDetail: View {
                 color.opacity(0.10),
                 in: RoundedRectangle(cornerRadius: 8, style: .continuous)
             )
+    }
+}
+
+// MARK: - Conversation presentation
+
+private struct ConversationPresentationModifier: ViewModifier {
+    @Binding var isPresented: Bool
+    let tester: TesterViewModel
+
+    func body(content: Content) -> some View {
+        #if os(macOS)
+        content.sheet(isPresented: $isPresented) {
+            LiveConversationView(tester: tester)
+                .frame(minWidth: 560, minHeight: 740)
+        }
+        #else
+        content.fullScreenCover(isPresented: $isPresented) {
+            LiveConversationView(tester: tester)
+        }
+        #endif
     }
 }
 

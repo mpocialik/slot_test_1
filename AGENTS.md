@@ -22,6 +22,10 @@ speaker diarization via FluidAudio.
 
 - `MyApp.swift` — `@main` entrypoint.
 - `ContentView.swift` — all UI in one file.
+- `LiveConversationView.swift` — full-screen, karaoke-style transcript:
+  centered auto-scrolling lines, word-by-word fill for volatile text, and
+  colored speaker labels. Presented from the **Conversation** button in the
+  main controls.
 - `TesterViewModel.swift` — `@MainActor @Observable` orchestrator: owns the
   transcriber and model client, owns the committed ledger, tracks the finalized
   transcript cursor, persists the call-level request tags, and runs the
@@ -40,7 +44,8 @@ speaker diarization via FluidAudio.
   `APPOINTMENT_REQUEST`, so keep those output lines when editing.
 - `LiveSpeechTranscriber.swift` — `AVAudioEngine` mic capture + live
   transcription; also owns the diarization capture. Exposes finalized turns by
-  index so the view model can consume each batch once.
+  index so the view model can consume each batch once, plus
+  `transcriptLines` (timed, speaker-attributed lines) for the conversation view.
 - `SpeakerDiarization.swift` — FluidAudio Sortformer diarization
   (`DiarizationAudioCapture`, `SpeakerDiarizationEngine` actor,
   `SpeakerDiarizationService`) and speaker-label lookup.

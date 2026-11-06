@@ -4,12 +4,29 @@ import Foundation
 import Observation
 import Speech
 
+/// A single timed line of the live transcript. The full-screen conversation
+/// view uses this instead of the plain string so it can highlight the active
+/// line, scroll to it, and color speaker changes.
+nonisolated struct TimedTranscriptLine: Identifiable, Equatable, Sendable {
+    let id: UUID
+    let text: String
+    let startTime: TimeInterval
+    let endTime: TimeInterval
+    let isFinal: Bool
+    let speakerNumber: Int?
+}
+
 /// Captures microphone audio and turns it into a live, on-device transcript
 /// using the Speech framework's `SpeechAnalyzer` / `SpeechTranscriber` APIs.
 @MainActor
 @Observable
 final class LiveSpeechTranscriber {
     private(set) var transcript = ""
+
+    /// Timed lines behind the full-screen conversation view. Updates use the
+    /// same display throttling and speaker-label refreshes as `transcript`.
+    private(set) var transcriptLines: [TimedTranscriptLine] = []
+
     private(set) var isListening = false
     private(set) var isPreparing = false
     private(set) var statusMessage = "Idle"
@@ -55,10 +72,22 @@ final class LiveSpeechTranscriber {
     private var tapInstalled = false
 
     private struct TranscriptTurn: Identifiable {
-        let id = UUID()
+        let id: UUID
         let text: String
         let startTime: TimeInterval
         let endTime: TimeInterval
+
+        init(
+            id: UUID = UUID(),
+            text: String,
+            startTime: TimeInterval,
+            endTime: TimeInterval
+        ) {
+            self.id = id
+            self.text = text
+            self.startTime = startTime
+            self.endTime = endTime
+        }
     }
 
     private var finalizedTurns: [TranscriptTurn] = []
@@ -146,6 +175,7 @@ final class LiveSpeechTranscriber {
         displayTask?.cancel()
         displayTask = nil
         transcript = ""
+        transcriptLines = []
         finalizedTurns.removeAll()
         finalizedTurnCount = 0
         volatileTurn = nil
@@ -335,11 +365,33 @@ final class LiveSpeechTranscriber {
         )
 
         if result.isFinal {
+            // If this final result replaces the volatile line on screen, keep
+            // its identity so the conversation view does not flash or restart.
+            let finalID: UUID
             if let volatileTurn, rangesOverlap(volatileTurn, turn) {
+                finalID = volatileTurn.id
                 self.volatileTurn = nil
+            } else {
+                finalID = turn.id
             }
-            finalizedTurns.append(turn)
+
+            finalizedTurns.append(
+                TranscriptTurn(
+                    id: finalID,
+                    text: turn.text,
+                    startTime: turn.startTime,
+                    endTime: turn.endTime
+                )
+            )
             finalizedTurnCount += 1
+        } else if let volatileTurn, rangesOverlap(volatileTurn, turn) {
+            // Keep one stable id while the recognizer refines the same phrase.
+            self.volatileTurn = TranscriptTurn(
+                id: volatileTurn.id,
+                text: turn.text,
+                startTime: turn.startTime,
+                endTime: turn.endTime
+            )
         } else {
             volatileTurn = turn
         }
@@ -394,7 +446,52 @@ final class LiveSpeechTranscriber {
 
     private func showCurrentTranscript() {
         lastDisplayUpdate = .now
-        transcript = renderTranscript()
+        let turns = finalizedTurns + (volatileTurn.map { [$0] } ?? [])
+        let labeled = labeledTurns(for: turns)
+        transcript = render(labeledTurns: labeled)
+        transcriptLines = currentTranscriptLines(from: labeled)
+    }
+
+    private struct LabeledTurn {
+        let turn: TranscriptTurn
+        let slot: Int?
+    }
+
+    /// Attaches one speaker lookup to each turn. The plain transcript and the
+    /// conversation lines both reuse the result so diarization is not queried twice.
+    private func labeledTurns(for turns: [TranscriptTurn]) -> [LabeledTurn] {
+        let canLabel = usesSpeakerLabels && sessionUsesSpeakerLabels && diarization.hasSpeakers
+        guard canLabel else {
+            return turns.map { LabeledTurn(turn: $0, slot: nil) }
+        }
+
+        return turns.map { turn in
+            LabeledTurn(
+                turn: turn,
+                slot: diarization.speakerSlot(for: turn.startTime...turn.endTime)
+            )
+        }
+    }
+
+    /// Builds the timed, speaker-attributed lines used by the conversation view.
+    /// The line for the volatile result is marked non-final so the view can
+    /// animate its words while the recognizer is still refining them.
+    private func currentTranscriptLines(from labeledTurns: [LabeledTurn]) -> [TimedTranscriptLine] {
+        labeledTurns.compactMap { item in
+            let text = item.turn.text.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !text.isEmpty else { return nil }
+
+            let number = item.slot.flatMap { diarization.speakerNumber(for: $0) }
+
+            return TimedTranscriptLine(
+                id: item.turn.id,
+                text: text,
+                startTime: item.turn.startTime,
+                endTime: item.turn.endTime,
+                isFinal: volatileTurn?.id != item.turn.id,
+                speakerNumber: number
+            )
+        }
     }
 
     private func diarizationDidUpdate() {
@@ -403,23 +500,21 @@ final class LiveSpeechTranscriber {
         flushTranscriptDisplay()
     }
 
-    private func renderTranscript() -> String {
-        let turns = finalizedTurns + (volatileTurn.map { [$0] } ?? [])
-        return render(turns: turns)
+    private func render(turns: [TranscriptTurn]) -> String {
+        render(labeledTurns: labeledTurns(for: turns))
     }
 
-    private func render(turns: [TranscriptTurn]) -> String {
+    private func render(labeledTurns: [LabeledTurn]) -> String {
         guard usesSpeakerLabels, sessionUsesSpeakerLabels, diarization.hasSpeakers else {
-            return turns.map(\.text).joined()
+            return labeledTurns.map(\.turn.text).joined()
         }
 
         var groups: [(slot: Int?, text: String)] = []
-        for turn in turns {
-            let slot = diarization.speakerSlot(for: turn.startTime...turn.endTime)
-            if let last = groups.last, last.slot == slot {
-                groups[groups.count - 1].text += turn.text
+        for item in labeledTurns {
+            if let last = groups.last, last.slot == item.slot {
+                groups[groups.count - 1].text += item.turn.text
             } else {
-                groups.append((slot, turn.text))
+                groups.append((item.slot, item.turn.text))
             }
         }
 

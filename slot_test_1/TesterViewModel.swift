@@ -151,6 +151,11 @@ final class TesterViewModel {
         transcriber.transcript
     }
 
+    /// Timed transcript lines for the full-screen conversation view.
+    var transcriptLines: [TimedTranscriptLine] {
+        transcriber.transcriptLines
+    }
+
     var modelOutput: String {
         model.output
     }
