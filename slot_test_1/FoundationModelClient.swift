@@ -53,6 +53,9 @@ struct LLMCallRecord: Identifiable {
     let instructions: String
     let prompt: String
     let options: String
+    /// Optional row preview for prompts whose last line is not meaningful
+    /// (for example, an output-format cue).
+    var previewOverride: String? = nil
     var output = ""
     var note: String?
     var errorMessage: String?
@@ -77,10 +80,15 @@ struct LLMCallRecord: Identifiable {
         """
     }
 
-    /// Last non-empty line of the prompt, which is the newest speech for an
-    /// update and the tail of the ledger for a compaction.
+    /// Row preview: an explicit override when set, otherwise the last
+    /// non-empty prompt line (the tail of the ledger for a compaction).
     var preview: String {
-        prompt
+        if let previewOverride,
+           !previewOverride.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return previewOverride
+        }
+
+        return prompt
             .split(whereSeparator: \.isNewline)
             .last(where: { !$0.trimmingCharacters(in: .whitespaces).isEmpty })
             .map(String.init) ?? prompt
@@ -94,14 +102,35 @@ struct LLMCallRecord: Identifiable {
     }
 }
 
+/// Call-level request tags produced by the second model pass. Tags accumulate
+/// for the current call so a detected request stays visible after the
+/// transcript moves on. **Clear** starts a new call and resets them.
+struct RequestTags {
+    var prescriptionRequest = false
+    var appointmentRequest = false
+
+    var isEmpty: Bool {
+        !prescriptionRequest && !appointmentRequest
+    }
+
+    mutating func merge(_ other: RequestTags) {
+        prescriptionRequest = prescriptionRequest || other.prescriptionRequest
+        appointmentRequest = appointmentRequest || other.appointmentRequest
+    }
+}
+
 /// Folds finalized speech into a running medical ledger using Apple's
 /// on-device Foundation Model.
 ///
-/// The ledger is the conversation state. Every update is a stateless request
-/// of the form `previous ledger + new transcript -> updated ledger`; no
-/// `LanguageModelSession` history is carried between updates. That keeps the
-/// prompt bounded, makes overflow recoverable, and means an ASR revision can
-/// never invalidate a shared session.
+/// The ledger is the conversation state. Every update is a stateless
+/// two-pass request:
+///
+/// 1. `previous ledger + new transcript -> updated ledger`
+/// 2. `new transcript -> RX_REQUEST / APPOINTMENT_REQUEST`
+///
+/// No `LanguageModelSession` history is carried between updates. That keeps
+/// the prompt bounded, makes overflow recoverable, and means an ASR revision
+/// can never invalidate a shared session.
 @MainActor
 @Observable
 final class FoundationModelClient {
@@ -110,6 +139,9 @@ final class FoundationModelClient {
     private(set) var errorMessage: String?
     private(set) var availability = SystemLanguageModel.default.availability
 
+    /// Request flags from the second pass, merged across the current call.
+    private(set) var requestTags = RequestTags()
+
     /// Every model call made during this app session, in order. Not persisted.
     private(set) var history: [LLMCallRecord] = []
 
@@ -117,15 +149,54 @@ final class FoundationModelClient {
     /// model does not; reasoning is currently a Private Cloud Compute feature.
     private(set) var supportsReasoning = SystemLanguageModel.default.capabilities.contains(.reasoning)
 
+    /// Inline copy of the second-pass prompt, used only when
+    /// `DefaultClassificationPrompt.md` is missing or empty in the app bundle.
+    private static let inlineClassificationPrompt = """
+    Analyze the conversation snippet below and classify patient requests.
+
+    Snippet:
+    "{{SNIPPET}}"
+
+    Questions:
+    1. Did the patient explicitly ask for a medication refill, renewal, new prescription, or dose change? Answer YES or NO.
+    2. Did either party explicitly ask to schedule an in-office appointment? Answer YES or NO.
+
+    Output Format:
+    RX_REQUEST: [YES/NO]
+    APPOINTMENT_REQUEST: [YES/NO]
+    """
+
+    /// Template for the second-pass classification prompt, read from
+    /// `DefaultClassificationPrompt.md` in the app bundle at launch. The
+    /// `{{SNIPPET}}` placeholder marks where the new transcript is inserted;
+    /// when it is absent, the snippet is appended to the template instead.
+    private static let classificationPromptTemplate: String = {
+        guard let url = Bundle.main.url(
+            forResource: "DefaultClassificationPrompt",
+            withExtension: "md"
+        ) else {
+            #if DEBUG
+            print("DefaultClassificationPrompt.md is missing from the app bundle; using the inline fallback prompt.")
+            #endif
+            return inlineClassificationPrompt
+        }
+
+        guard let text = try? String(contentsOf: url, encoding: .utf8) else {
+            #if DEBUG
+            print("DefaultClassificationPrompt.md could not be read; using the inline fallback prompt.")
+            #endif
+            return inlineClassificationPrompt
+        }
+
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? inlineClassificationPrompt : trimmed
+    }()
+
     /// Reasoning depth used for the next request.
     var reasoningLevel: ModelReasoningLevel = .moderate
 
-    /// Artificial delay between streamed updates, in seconds. `0` shows
-    /// tokens as fast as the model produces them.
-    var streamUpdateInterval: TimeInterval = 0
-
     /// Compact the ledger before it grows past this many characters. The
-    /// compaction turn must preserve every fact and tag.
+    /// compaction turn must preserve every fact.
     private static let ledgerCharacterBudget = 6_000
 
     /// Safety net for one update's transcript. A cadence-sized batch is far
@@ -167,7 +238,18 @@ final class FoundationModelClient {
         output = text
     }
 
-    /// Folds `newTranscript` into `previousLedger`.
+    /// Shows persisted request tags after launch without starting a request.
+    func restoreRequestTags(_ tags: RequestTags) {
+        guard !isResponding else { return }
+        requestTags = tags
+    }
+
+    /// Runs the two-pass update pipeline for `newTranscript`.
+    ///
+    /// Pass one folds the speech into `previousLedger`. Pass two classifies
+    /// the same snippet for an explicit prescription or in-office appointment
+    /// request and merges any flags into `requestTags`. Pass one's answer is
+    /// buffered, so `output` is only replaced once both passes succeed.
     ///
     /// `completion(true)` means `output` holds a complete replacement ledger.
     /// `completion(false)` means the ledger is unchanged and the caller should
@@ -258,8 +340,14 @@ final class FoundationModelClient {
                 let callID = self.beginCall(
                     label: callLabel,
                     instructions: sessionInstructions,
-                    prompt: prompt
+                    prompt: prompt,
+                    preview: transcript
                 )
+
+                // Pass one is buffered instead of published: users only see
+                // the ledger after pass two has accepted the same snippet, so
+                // an unclassified intermediate answer is never shown.
+                var streamedLedger = ledger
 
                 do {
                     let session = self.makeSession(instructions: sessionInstructions)
@@ -268,30 +356,24 @@ final class FoundationModelClient {
                         contextOptions: self.contextOptions()
                     )
 
-                    var isFirstUpdate = true
                     for try await snapshot in stream {
-                        if !isFirstUpdate, self.streamUpdateInterval > 0 {
-                            try await Task.sleep(for: .seconds(self.streamUpdateInterval))
-                        }
-                        isFirstUpdate = false
-
                         guard !Task.isCancelled, self.activeRequestID == requestID else {
-                            self.finishCall(callID, output: self.output, cancelled: true)
+                            self.finishCall(callID, output: streamedLedger, cancelled: true)
                             return
                         }
-                        self.output = snapshot.content
+                        streamedLedger = snapshot.content
                     }
 
                     guard !Task.isCancelled, self.activeRequestID == requestID else {
-                        self.finishCall(callID, output: self.output, cancelled: true)
+                        self.finishCall(callID, output: streamedLedger, cancelled: true)
                         return
                     }
 
-                    let newLedger = self.output
+                    let newLedger = streamedLedger
                         .trimmingCharacters(in: .whitespacesAndNewlines)
                     guard !newLedger.isEmpty else {
                         // Never replace a real ledger with an empty response.
-                        self.output = ledger
+                        self.output = baseline
                         self.errorMessage = "The model returned an empty ledger."
                         self.finishCall(
                             callID,
@@ -311,7 +393,6 @@ final class FoundationModelClient {
                        newBullets * 4 < previousBullets * 3,
                        !didRetryAfterShrink {
                         didRetryAfterShrink = true
-                        self.output = ledger
                         self.finishCall(
                             callID,
                             output: newLedger,
@@ -321,11 +402,40 @@ final class FoundationModelClient {
                     }
 
                     self.finishCall(callID, output: newLedger)
+
+                    // Pass two runs after the ledger is complete. The update
+                    // is only committed once classification has finished, so
+                    // the tags and ledger appear together to the caller.
+                    let classifiedTags = await self.classifyRequests(
+                        in: transcript,
+                        requestID: requestID
+                    )
+
+                    guard !Task.isCancelled, self.activeRequestID == requestID else {
+                        return
+                    }
+
+                    guard let classifiedTags else {
+                        // A thrown classifier error aborts the update so the
+                        // caller retries the same transcript. An unparseable
+                        // response returns empty tags and does not land here.
+                        self.output = baseline
+                        if self.errorMessage == nil {
+                            self.errorMessage = "The intent classification pass failed."
+                        }
+                        return
+                    }
+
+                    var tags = self.requestTags
+                    tags.merge(classifiedTags)
+                    self.requestTags = tags
+
+                    self.output = newLedger
                     succeeded = true
                     return
                 } catch {
                     guard !Task.isCancelled, self.activeRequestID == requestID else {
-                        self.finishCall(callID, output: self.output, cancelled: true)
+                        self.finishCall(callID, output: streamedLedger, cancelled: true)
                         return
                     }
 
@@ -335,11 +445,9 @@ final class FoundationModelClient {
                         // Compact and retry once with a smaller ledger.
                         didRetryAfterOverflow = true
                         forceCompaction = true
-                        let partial = self.output
-                        self.output = ledger
                         self.finishCall(
                             callID,
-                            output: partial,
+                            output: streamedLedger,
                             note: "Context limit hit; retrying with a compacted ledger."
                         )
                         continue
@@ -347,10 +455,9 @@ final class FoundationModelClient {
 
                     let message = (error as? LocalizedError)?.errorDescription
                         ?? error.localizedDescription
-                    let partial = self.output
                     self.output = baseline
                     self.errorMessage = message
-                    self.finishCall(callID, output: partial, error: message)
+                    self.finishCall(callID, output: streamedLedger, error: message)
                     return
                 }
             }
@@ -367,6 +474,7 @@ final class FoundationModelClient {
     func clear() {
         cancel()
         output = ""
+        requestTags = RequestTags()
         errorMessage = nil
     }
 
@@ -379,9 +487,10 @@ final class FoundationModelClient {
     private func beginCall(
         label: String,
         instructions: String,
-        prompt: String
+        prompt: String,
+        preview: String? = nil
     ) -> UUID {
-        let record = LLMCallRecord(
+        var record = LLMCallRecord(
             startedAt: .now,
             label: label,
             instructions: instructions,
@@ -390,6 +499,7 @@ final class FoundationModelClient {
                 ? "Reasoning: \(reasoningLevel.title)"
                 : "Reasoning: none (on-device)"
         )
+        record.previewOverride = preview
         history.append(record)
         return record.id
     }
@@ -421,6 +531,7 @@ final class FoundationModelClient {
         let ledger = previousLedger.isEmpty ? "(empty)" : previousLedger
 
         var prompt = """
+        ---
         PREVIOUS LEDGER:
         \(ledger)
 
@@ -438,21 +549,101 @@ final class FoundationModelClient {
             """
         }
 
+        prompt += "\n\nUPDATED LEDGER:"
         return prompt
     }
 
+    /// Second pass: a self-contained classification prompt over the same
+    /// snippet. It deliberately does not receive the ledger, so it cannot
+    /// mistake an old request for a new one. The prompt body lives in
+    /// `DefaultClassificationPrompt.md`; this method only substitutes the
+    /// snippet.
+    private func requestClassificationPrompt(for transcript: String) -> String {
+        let snippet = promptText(from: transcript)
+        let template = Self.classificationPromptTemplate
+
+        guard template.contains("{{SNIPPET}}") else {
+            // A custom template that omitted the placeholder still receives
+            // the snippet, so classification never runs on empty input.
+            return template + "\n\nSnippet:\n\"\(snippet)\""
+        }
+
+        return template.replacingOccurrences(of: "{{SNIPPET}}", with: snippet)
+    }
+
+    /// Runs the second pass. A thrown error aborts the update so the caller
+    /// retries the same transcript; an unparseable response is recorded and
+    /// treated as no new tags so a malformed answer cannot block the ledger.
+    private func classifyRequests(
+        in transcript: String,
+        requestID: UUID
+    ) async -> RequestTags? {
+        let prompt = requestClassificationPrompt(for: transcript)
+        let callID = beginCall(
+            label: "Intent classification",
+            instructions: "",
+            prompt: prompt,
+            preview: transcript
+        )
+        var raw = ""
+
+        do {
+            let session = makeSession(instructions: "")
+            let stream = session.streamResponse(
+                to: prompt,
+                contextOptions: contextOptions()
+            )
+
+            for try await snapshot in stream {
+                guard !Task.isCancelled, activeRequestID == requestID else {
+                    finishCall(callID, output: raw, cancelled: true)
+                    return nil
+                }
+                raw = snapshot.content
+            }
+
+            guard !Task.isCancelled, activeRequestID == requestID else {
+                finishCall(callID, output: raw, cancelled: true)
+                return nil
+            }
+
+            let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard let tags = Self.parseRequestTags(from: trimmed) else {
+                finishCall(
+                    callID,
+                    output: trimmed,
+                    error: "Could not parse RX_REQUEST / APPOINTMENT_REQUEST."
+                )
+                return RequestTags()
+            }
+
+            finishCall(callID, output: trimmed)
+            return tags
+        } catch {
+            guard !Task.isCancelled, activeRequestID == requestID else {
+                finishCall(callID, output: raw, cancelled: true)
+                return nil
+            }
+
+            let message = (error as? LocalizedError)?.errorDescription
+                ?? error.localizedDescription
+            errorMessage = message
+            finishCall(callID, output: raw, error: message)
+            return nil
+        }
+    }
+
     /// Runs a separate, non-streaming-to-UI turn that shortens the ledger
-    /// while preserving every fact and tag.
+    /// while preserving every fact.
     private func compactLedger(
         _ ledger: String,
         instructions: String,
         requestID: UUID
     ) async -> String? {
         let prompt = """
-        Compress the ledger below. Preserve every distinct clinical fact and \
-        every <MentionPrescription> or <MentionAppointment> tag. Merge \
-        duplicate or redundant bullets and shorten wording. Do not add any \
-        new fact. Output only the bulleted list.
+        Compress the ledger below. Preserve every distinct clinical fact. \
+        Merge duplicate or redundant bullets and shorten wording. Do not add \
+        any new fact. Output only the bulleted list.
 
         LEDGER:
         \(ledger)
@@ -518,8 +709,82 @@ final class FoundationModelClient {
         return LanguageModelSession(instructions: instructions)
     }
 
-    /// Counts top-level bullets only; nested tag bullets are indented and are
-    /// intentionally ignored.
+    /// Parses the two expected classification lines. A missing key is treated
+    /// as NO; a response with neither key is unparseable so the caller can
+    /// leave the existing tags untouched.
+    private static func parseRequestTags(from text: String) -> RequestTags? {
+        let prescriptionKeys = [
+            "RX_REQUEST",
+            "RX REQUEST",
+            "RX:",
+            "PRESCRIPTION REQUEST",
+            "PRESCRIPTION:"
+        ]
+        let appointmentKeys = [
+            "APPOINTMENT_REQUEST",
+            "APPOINTMENT REQUEST",
+            "APPOINTMENT:"
+        ]
+        let allKeys = prescriptionKeys + appointmentKeys
+
+        var tags = RequestTags()
+        var foundPrescription = false
+        var foundAppointment = false
+
+        for rawLine in text.split(whereSeparator: \.isNewline) {
+            let line = rawLine
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+                .uppercased()
+            guard !line.isEmpty else { continue }
+
+            if let key = prescriptionKeys.first(where: { line.contains($0) }),
+               let value = yesNoValue(in: line, after: key, allKeys: allKeys) {
+                foundPrescription = true
+                tags.prescriptionRequest = value
+            }
+
+            if let key = appointmentKeys.first(where: { line.contains($0) }),
+               let value = yesNoValue(in: line, after: key, allKeys: allKeys) {
+                foundAppointment = true
+                tags.appointmentRequest = value
+            }
+        }
+
+        guard foundPrescription || foundAppointment else { return nil }
+        return tags
+    }
+
+    /// Reads the YES/NO value following `key`. The value is cut at the next
+    /// known key so a combined one-line response still parses correctly.
+    private static func yesNoValue(
+        in line: String,
+        after key: String,
+        allKeys: [String]
+    ) -> Bool? {
+        guard let keyRange = line.range(of: key) else { return nil }
+        var valueText = line[keyRange.upperBound...]
+
+        for otherKey in allKeys where otherKey != key {
+            if let otherRange = valueText.range(of: otherKey) {
+                valueText = valueText[..<otherRange.lowerBound]
+            }
+        }
+
+        // Reject an unfilled template such as `[YES/NO]`.
+        let compact = valueText.filter { !$0.isWhitespace }
+        guard !compact.contains("YES/NO") else { return nil }
+
+        let tokens = valueText
+            .split(whereSeparator: { !$0.isLetter })
+            .map(String.init)
+        guard let first = tokens.first(where: { $0 == "YES" || $0 == "NO" }) else {
+            return nil
+        }
+        return first == "YES"
+    }
+
+    /// Counts top-level bullets only; older ledgers may still contain indented
+    /// tag sub-bullets, which are intentionally ignored.
     private static func bulletCount(in text: String) -> Int {
         text.split(whereSeparator: \.isNewline).reduce(into: 0) { count, line in
             if line.hasPrefix("* ") {

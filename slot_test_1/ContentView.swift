@@ -318,7 +318,12 @@ struct ContentView: View {
         }
         .buttonStyle(.bordered)
         .controlSize(.large)
-        .disabled(tester.transcript.isEmpty && tester.modelOutput.isEmpty && !tester.isResponding)
+        .disabled(
+            tester.transcript.isEmpty
+                && tester.modelOutput.isEmpty
+                && !tester.hasRequestTags
+                && !tester.isResponding
+        )
         .accessibilityLabel("Clear transcript and response")
     }
 
@@ -347,16 +352,38 @@ struct ContentView: View {
             title: "Running Ledger",
             systemImage: "list.clipboard",
             showsProgress: tester.isResponding,
-            copyText: tester.modelOutput
+            copyText: tester.ledgerCopyText
         ) {
-            if tester.modelOutput.isEmpty {
-                Text(tester.isResponding
-                     ? "Updating ledger…"
-                     : responsePlaceholder)
-                    .foregroundStyle(.secondary)
-            } else {
-                Text(tester.modelOutput)
-                    .textSelection(.enabled)
+            VStack(alignment: .leading, spacing: 10) {
+                if tester.hasRequestTags {
+                    HStack(spacing: 8) {
+                        if tester.prescriptionRequestDetected {
+                            StatusPill(
+                                text: "Rx request",
+                                systemImage: "pills.fill",
+                                color: .blue
+                            )
+                        }
+
+                        if tester.appointmentRequestDetected {
+                            StatusPill(
+                                text: "Appointment request",
+                                systemImage: "calendar.badge.plus",
+                                color: .purple
+                            )
+                        }
+                    }
+                }
+
+                if tester.modelOutput.isEmpty {
+                    Text(tester.isResponding
+                         ? "Updating ledger…"
+                         : responsePlaceholder)
+                        .foregroundStyle(.secondary)
+                } else {
+                    Text(tester.modelOutput)
+                        .textSelection(.enabled)
+                }
             }
         }
         .frame(minHeight: 170, alignment: .top)
@@ -491,12 +518,10 @@ private struct ConfigurationPanel: View {
                     diarizationTuningSection
                     Divider()
                     llmSpeedSection
-                    Divider()
-                    instructionsSection
                 }
                 .padding(.top, 10)
             } label: {
-                Text("Speed, speakers, and ledger instructions")
+                Text("Speed and speakers")
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
             }
@@ -770,21 +795,6 @@ private struct ConfigurationPanel: View {
                 .font(.caption)
                 .foregroundStyle(.secondary)
 
-            HStack(spacing: 12) {
-                Text("Stream lag")
-                    .frame(width: 82, alignment: .leading)
-
-                Slider(value: $tester.llmStreamLatencyMilliseconds, in: 0...300, step: 25)
-
-                Text("\(Int(tester.llmStreamLatencyMilliseconds)) ms")
-                    .monospacedDigit()
-                    .frame(width: 54, alignment: .trailing)
-            }
-
-            Text("Artificial delay between streamed model updates. 0 ms is as fast as the model can respond.")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-
             Toggle(isOn: $tester.autoSendEnabled) {
                 VStack(alignment: .leading, spacing: 2) {
                     Text("Send automatically")
@@ -806,38 +816,6 @@ private struct ConfigurationPanel: View {
             }
             .disabled(!tester.autoSendEnabled)
             .opacity(tester.autoSendEnabled ? 1 : 0.5)
-        }
-    }
-
-    private var instructionsSection: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            HStack(spacing: 8) {
-                Text("System instructions")
-                    .font(.subheadline.weight(.semibold))
-
-                Spacer()
-
-                Button("Reset to default") {
-                    tester.resetInstructions()
-                }
-                .buttonStyle(.bordered)
-                .controlSize(.small)
-                .disabled(tester.instructions == TesterViewModel.defaultInstructions)
-            }
-
-            TextEditor(text: $tester.instructions)
-                .font(.callout)
-                .frame(height: 110)
-                .scrollContentBackground(.hidden)
-                .padding(8)
-                .background(
-                    Color.primary.opacity(0.05),
-                    in: RoundedRectangle(cornerRadius: 10, style: .continuous)
-                )
-
-            Text("The built-in default lives in DefaultSystemPrompt.md in the app folder. Edit it in any text editor and rebuild.")
-                .font(.caption)
-                .foregroundStyle(.secondary)
         }
     }
 }

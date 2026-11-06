@@ -7,17 +7,21 @@ final class TesterViewModel {
     let transcriber = LiveSpeechTranscriber()
     let model = FoundationModelClient()
 
-    private static let instructionsDefaultsKey = "systemInstructions"
+    /// Key written by older builds that allowed editing the pass-one prompt
+    /// in-app. Removed on launch so the bundled Markdown prompt is always used.
+    private static let legacyInstructionsDefaultsKey = "systemInstructions"
     private static let speakerLabelsDefaultsKey = "speakerLabelsEnabled"
     private static let diarizationTuningDefaultsKey = "diarizationTuning"
     private static let ledgerDefaultsKey = "runningLedger"
+    private static let prescriptionRequestDefaultsKey = "prescriptionRequestDetected"
+    private static let appointmentRequestDefaultsKey = "appointmentRequestDetected"
 
     /// Name of the bundled file holding the built-in prompt. It is a plain
     /// `.md` file so it can be edited in any text editor without opening Xcode.
     private static let defaultInstructionsResource = "DefaultSystemPrompt"
 
-    /// Live copy of the built-in prompt, read from `DefaultSystemPrompt.md`
-    /// in the app bundle. Edit that file and rebuild to change the default.
+    /// Live copy of the pass-one prompt, read from `DefaultSystemPrompt.md`
+    /// in the app bundle. Edit that file and rebuild to change the prompt.
     ///
     /// `inlineDefaultInstructions` is only used if the resource is missing or
     /// empty so the app still runs with a sane prompt.
@@ -44,32 +48,21 @@ final class TesterViewModel {
     }()
 
     private static let inlineDefaultInstructions = """
-    You are a precise medical scribe maintaining a running ledger of a patient \
-    phone call. Each update gives you the PREVIOUS LEDGER and the NEW TRANSCRIPT \
-    of finalized speech. Carry forward every existing bullet and add atomic \
-    bullets for new clinical facts, symptoms, requests, and doctor actions. Never \
-    invent facts and never delete a bullet; rewrite a bullet in place if new \
-    speech corrects it. Infer which speaker is the physician or patient from \
-    content; "Speaker 1"/"Speaker 2" numbers are not stable. Tag a bullet with \
-    <MentionPrescription> only for an explicit prescription request (refill, \
-    renewal, new prescription, or dosage change), and with <MentionAppointment> \
-    only when scheduling an in-office appointment is explicitly discussed. If \
-    the new transcript has no new clinical data, return the previous ledger \
-    unchanged. Output only the complete bulleted ledger.
-    """
+    You are a medical scribe maintaining a running clinical ledger.
 
-    /// Persisted in `UserDefaults` so custom instructions survive relaunches.
-    /// The saved value is dropped when the text matches the built-in prompt so
-    /// later edits to `DefaultSystemPrompt.md` are picked up after a rebuild.
-    var instructions: String {
-        didSet {
-            if instructions == Self.defaultInstructions {
-                UserDefaults.standard.removeObject(forKey: Self.instructionsDefaultsKey)
-            } else {
-                UserDefaults.standard.set(instructions, forKey: Self.instructionsDefaultsKey)
-            }
-        }
-    }
+    Task:
+    Combine PREVIOUS LEDGER with NEW TRANSCRIPT to create an updated bulleted list.
+
+    Instructions:
+    1. Keep all existing facts from PREVIOUS LEDGER.
+    2. Add new facts from NEW TRANSCRIPT as clear, concise bullets from the physician's view.
+    3. Keep each bullet to one clinical fact (symptom, medication, request, or plan).
+    4. Combine duplicate points. Remove conversational filler.
+    5. If NEW TRANSCRIPT has no new medical facts, return PREVIOUS LEDGER exactly as it is.
+
+    OUTPUT FORMAT:
+    Return ONLY bullet points. No introductory text.
+    """
 
     var autoSendEnabled = true
     var cadenceSeconds: Double = 5
@@ -98,8 +91,9 @@ final class TesterViewModel {
     }
 
     init() {
-        instructions = UserDefaults.standard.string(forKey: Self.instructionsDefaultsKey)
-            ?? Self.defaultInstructions
+        // Older builds persisted an in-app pass-one override. Prompts now come
+        // only from the bundled Markdown files, so drop any stale value.
+        UserDefaults.standard.removeObject(forKey: Self.legacyInstructionsDefaultsKey)
 
         let savedLedger = UserDefaults.standard.string(forKey: Self.ledgerDefaultsKey) ?? ""
         ledger = savedLedger
@@ -118,6 +112,16 @@ final class TesterViewModel {
         }
 
         model.restoreLedger(savedLedger)
+        model.restoreRequestTags(
+            RequestTags(
+                prescriptionRequest: UserDefaults.standard.bool(
+                    forKey: Self.prescriptionRequestDefaultsKey
+                ),
+                appointmentRequest: UserDefaults.standard.bool(
+                    forKey: Self.appointmentRequestDefaultsKey
+                )
+            )
+        )
     }
 
     /// Fast speech results appear sooner but may be less accurate. Applies
@@ -139,12 +143,6 @@ final class TesterViewModel {
         set { model.reasoningLevel = newValue }
     }
 
-    /// Artificial delay between streamed model updates, in milliseconds.
-    var llmStreamLatencyMilliseconds: Double {
-        get { model.streamUpdateInterval * 1_000 }
-        set { model.streamUpdateInterval = max(0, newValue / 1_000) }
-    }
-
     private var cadenceTask: Task<Void, Never>?
     private var consumedFinalizedTurnCount = 0
     private var sendGeneration = 0
@@ -155,6 +153,38 @@ final class TesterViewModel {
 
     var modelOutput: String {
         model.output
+    }
+
+    /// Call-level request tags from the second model pass.
+    var prescriptionRequestDetected: Bool {
+        model.requestTags.prescriptionRequest
+    }
+
+    var appointmentRequestDetected: Bool {
+        model.requestTags.appointmentRequest
+    }
+
+    var hasRequestTags: Bool {
+        !model.requestTags.isEmpty
+    }
+
+    /// Copy text includes the request tags alongside the ledger, since the
+    /// tags are displayed as chips rather than as ledger bullets.
+    var ledgerCopyText: String {
+        var parts: [String] = []
+
+        let output = model.output.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !output.isEmpty {
+            parts.append(output)
+        }
+        if model.requestTags.prescriptionRequest {
+            parts.append("- [TAG: Rx Request]")
+        }
+        if model.requestTags.appointmentRequest {
+            parts.append("- [TAG: Appointment Request]")
+        }
+
+        return parts.joined(separator: "\n")
     }
 
     var isListening: Bool {
@@ -282,12 +312,6 @@ final class TesterViewModel {
         diarizationTuning = .default
     }
 
-    /// Restores the built-in prompt from `DefaultSystemPrompt.md`, discarding
-    /// any custom text saved in `UserDefaults`.
-    func resetInstructions() {
-        instructions = Self.defaultInstructions
-    }
-
     func clearSpeakerModelCache() async {
         await transcriber.diarization.clearModelCache()
     }
@@ -319,6 +343,7 @@ final class TesterViewModel {
         consumedFinalizedTurnCount = 0
         ledger = ""
         persistLedger()
+        persistRequestTags()
     }
 
     func refreshModelAvailability() {
@@ -372,7 +397,7 @@ final class TesterViewModel {
         model.updateLedger(
             previousLedger: ledger,
             newTranscript: text,
-            instructions: instructions
+            instructions: Self.defaultInstructions
         ) { [weak self] succeeded in
             guard let self, self.sendGeneration == generation else { return }
             guard succeeded else { return }
@@ -383,6 +408,7 @@ final class TesterViewModel {
             self.ledger = self.model.output
                 .trimmingCharacters(in: .whitespacesAndNewlines)
             self.persistLedger()
+            self.persistRequestTags()
         }
     }
 
@@ -391,6 +417,22 @@ final class TesterViewModel {
             UserDefaults.standard.removeObject(forKey: Self.ledgerDefaultsKey)
         } else {
             UserDefaults.standard.set(ledger, forKey: Self.ledgerDefaultsKey)
+        }
+    }
+
+    private func persistRequestTags() {
+        let tags = model.requestTags
+
+        if tags.prescriptionRequest {
+            UserDefaults.standard.set(true, forKey: Self.prescriptionRequestDefaultsKey)
+        } else {
+            UserDefaults.standard.removeObject(forKey: Self.prescriptionRequestDefaultsKey)
+        }
+
+        if tags.appointmentRequest {
+            UserDefaults.standard.set(true, forKey: Self.appointmentRequestDefaultsKey)
+        } else {
+            UserDefaults.standard.removeObject(forKey: Self.appointmentRequestDefaultsKey)
         }
     }
 }

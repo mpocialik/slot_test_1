@@ -24,23 +24,34 @@ speaker diarization via FluidAudio.
 - `ContentView.swift` — all UI in one file.
 - `TesterViewModel.swift` — `@MainActor @Observable` orchestrator: owns the
   transcriber and model client, owns the committed ledger, tracks the finalized
-  transcript cursor, and runs the auto-send timer loop.
-- `DefaultSystemPrompt.md` — the built-in system prompt. It defines the
-  two-block ledger contract (`PREVIOUS LEDGER` + `NEW TRANSCRIPT`). Loaded from
-  the app bundle at launch (`TesterViewModel.defaultInstructions`), so edit this
-  file instead of Swift source to change the default. An inline copy in
-  `TesterViewModel.swift` is only the fallback if the resource is missing.
+  transcript cursor, persists the call-level request tags, and runs the
+  auto-send timer loop.
+- `DefaultSystemPrompt.md` — the built-in **pass-one ledger-update** prompt.
+  The client supplies the `PREVIOUS LEDGER`, `NEW TRANSCRIPT`, and
+  `UPDATED LEDGER:` blocks. Loaded from the app bundle at launch
+  (`TesterViewModel.defaultInstructions`), so edit this file instead of Swift
+  source to change the default. An inline copy in `TesterViewModel.swift` is
+  only the fallback if the resource is missing.
+- `DefaultClassificationPrompt.md` — the built-in **pass-two
+  intent-classification** prompt template. `{{SNIPPET}}` is replaced with the
+  same batch of finalized speech; when the placeholder is missing, the snippet
+  is appended. Loaded from the app bundle in `FoundationModelClient.swift`,
+  with an inline fallback there. The app parses `RX_REQUEST` and
+  `APPOINTMENT_REQUEST`, so keep those output lines when editing.
 - `LiveSpeechTranscriber.swift` — `AVAudioEngine` mic capture + live
   transcription; also owns the diarization capture. Exposes finalized turns by
   index so the view model can consume each batch once.
 - `SpeakerDiarization.swift` — FluidAudio Sortformer diarization
   (`DiarizationAudioCapture`, `SpeakerDiarizationEngine` actor,
   `SpeakerDiarizationService`) and speaker-label lookup.
-- `FoundationModelClient.swift` — stateless ledger updater: sends
-  `previous ledger + new transcript` to `SystemLanguageModel` and streams back
-  the complete updated ledger. No session history is retained. It also keeps an
-  in-memory `LLMCallRecord` log (prompts, outputs, errors) for the History
-  screen; that log is intentionally not persisted.
+- `FoundationModelClient.swift` — two-pass stateless ledger updater. Pass one
+  sends `previous ledger + new transcript` to `SystemLanguageModel` and buffers
+  the complete updated ledger. Pass two classifies the same transcript into
+  prescription/appointment request flags (`RequestTags`). The buffered ledger is
+  published to the UI only after pass two succeeds, so the previous ledger stays
+  on screen while both passes run and is kept on failure. No session history is
+  retained. It also keeps an in-memory `LLMCallRecord` log (prompts, outputs,
+  errors) for the History screen; that log is intentionally not persisted.
 
 Audio flow: one `installTap` feeds both the speech analyzer (via
 `AnalyzerInputConverter`) and `DiarizationAudioCapture`, which resamples to
@@ -66,12 +77,12 @@ actor, which forwards samples to the engine actor for inference.
   responses require Apple Intelligence (transcription works without it).
   Reasoning levels are ignored by the on-device model (`SystemLanguageModel`
   lacks the `.reasoning` capability) — see `FoundationModelClient.swift`.
-- Persisted settings use `UserDefaults` keys `systemInstructions`,
-  `speakerLabelsEnabled`, `diarizationTuning` (JSON), and `runningLedger` (the
-  committed ledger, cleared by **Clear**). `systemInstructions`
-  is only written when the text differs from the bundled default, so a rebuild
-  after editing `DefaultSystemPrompt.md` is picked up unless the user typed a
-  custom prompt (**Reset to default** clears it).
+- Persisted settings use `UserDefaults` keys `speakerLabelsEnabled`,
+  `diarizationTuning` (JSON), `runningLedger` (the committed ledger),
+  `prescriptionRequestDetected`, and `appointmentRequestDetected` (call-level
+  request tags). The ledger and tags are cleared by **Clear**. There is no
+  in-app prompt editor; prompts come only from the bundled Markdown files. A
+  legacy `systemInstructions` value is deleted on launch.
 - Model-call history (`LLMCallRecord`) is in-memory only, held by
   `FoundationModelClient.history`. It is not a `UserDefaults` key and is lost
   when the app exits.

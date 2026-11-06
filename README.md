@@ -12,14 +12,14 @@ Apple's on-device Foundation Model.
   rendering turns as “Speaker 1”, “Speaker 2”, and so on. Up to four speakers.
 - Shows volatile (in-progress) words as they are recognized and commits final results.
 - Lets you tune transcription speed with fast speech results and an artificial display lag.
-- Lets you tune model speed with a reasoning level and an artificial streaming lag.
-- Folds each batch of finalized speech into a running medical ledger every 5 seconds (configurable from 1–15 seconds).
+- Lets you tune model speed with a reasoning level.
+- Folds each batch of finalized speech into a running medical ledger every 5 seconds (configurable from 1–15 seconds), then runs a second pass that classifies prescription and appointment requests.
 - Keeps the ledger as the conversation state, so earlier speech and replies survive without an unbounded session history.
-- Streams the model's response back to the screen token by token.
+- Shows only the final ledger, after both passes finish; the intermediate pass-one result is never displayed.
 - Logs every model call for the current app session so you can inspect the exact
   system instructions, user prompt, output, and failures.
-- Provides "Send Now", "Clear", copy buttons, and editable system instructions
-  that persist across launches.
+- Shows detected request tags as chips above the ledger.
+- Provides "Send Now", "Clear", and copy buttons.
 
 Audio is never sent off the device. The transcript is passed only to Apple's
 on-device Foundation Model. Speaker diarization also runs locally through
@@ -75,31 +75,42 @@ Tuning values persist in `UserDefaults` and apply when you next start
 listening. Timeline-only changes reuse the loaded model; changing the preset
 loads a different model.
 
-## System instructions
+## Prompts
 
-The built-in system prompt lives in
-[`slot_test_1/DefaultSystemPrompt.md`](slot_test_1/DefaultSystemPrompt.md) as
-plain Markdown, so it can be edited in any text editor without opening Xcode.
-The app reads the file from its bundle at launch, so edits take effect on the
-next build and run.
+Both model passes are driven by plain Markdown files in
+[`slot_test_1`](slot_test_1), so they can be edited in any text editor without
+opening Xcode:
 
-Text typed into **Configuration → System instructions** is saved in
-`UserDefaults` and overrides the file. **Reset to default** discards that
-custom text and goes back to the version currently in the bundle. If the file
-is missing or empty, the app falls back to an inline copy of the prompt in
-`TesterViewModel.swift`.
+- **Pass one — ledger update**:
+  [`DefaultSystemPrompt.md`](slot_test_1/DefaultSystemPrompt.md). The client
+  supplies `PREVIOUS LEDGER`, `NEW TRANSCRIPT`, and `UPDATED LEDGER:` blocks, so
+  the prompt only needs to describe how to update the ledger.
+- **Pass two — intent classification**:
+  [`DefaultClassificationPrompt.md`](slot_test_1/DefaultClassificationPrompt.md).
+  The `{{SNIPPET}}` placeholder is replaced with the same batch of finalized
+  speech. If the placeholder is omitted, the snippet is appended instead. Keep
+  the `RX_REQUEST` and `APPOINTMENT_REQUEST` output lines: the app parses them.
 
-The default prompt is the medical-scribe ledger contract. The client always
-wraps input as `PREVIOUS LEDGER` and `NEW TRANSCRIPT`, so a custom prompt should
-keep that two-block shape if it wants to use the running ledger as state.
+The app reads both files from its bundle, so edits take effect on the next build
+and run. If a file is missing or empty, the app falls back to an inline copy of
+that prompt in `TesterViewModel.swift` (pass one) or
+`FoundationModelClient.swift` (pass two).
+
+There is no in-app prompt editor: both prompts are edited only through their
+Markdown files. A `systemInstructions` value saved by an older build is removed
+on launch.
+
+The pass-two prompt deliberately does not receive the ledger, so an old request
+cannot be mistaken for a new one.
 
 ## Running ledger
 
-The ledger is the only model workload. Each update is a stateless request:
+The ledger is the model's conversation state. Each update is a stateless
+two-pass pipeline over the same batch of finalized speech:
 
-```
-previous ledger + new finalized speech -> updated ledger
-```
+1. **Ledger update** — `previous ledger + new transcript -> updated ledger`.
+2. **Intent classification** — the same new transcript is classified into
+   `RX_REQUEST` and `APPOINTMENT_REQUEST` flags.
 
 No `LanguageModelSession` history is carried between updates. The ledger itself
 is the state, so it stays bounded, can be inspected, and survives an ASR
@@ -109,16 +120,24 @@ Behavior worth knowing:
 
 - Only **finalized** speech is sent. Volatile words stay on screen but never
   enter the ledger, so a revised partial result cannot corrupt the state.
-- The transcript cursor advances only after a successful update. If the model
-  errors or the request is interrupted, the same speech is retried next tick.
+- The transcript cursor advances only after both passes finish. If either pass
+  throws or the request is interrupted, the same speech is retried next tick.
+- Pass one is buffered. The screen keeps showing the previous ledger while both
+  passes run, then swaps in the new ledger and request flags together. A failed
+  or interrupted update leaves the previous ledger visible.
+- Request flags are cumulative for the call and appear as chips above the
+  ledger. An unparseable classification is recorded in History and treated as
+  no new tags; existing flags stay in place and the ledger update still commits.
 - `Send Now` flushes pending finalized speech and does not re-send anything
   already folded in.
 - If the ledger grows past roughly 6,000 characters, a separate compaction turn
-  shortens it while preserving every fact and tag. An update that loses a large
-  share of the existing bullets is rejected once and retried with a preservation
+  shortens it while preserving every fact. An update that loses a large share
+  of the existing bullets is rejected once and retried with a preservation
   reminder.
-- The ledger is persisted in `UserDefaults` (`runningLedger`) so a crash or a
-  backgrounded call does not lose it. **Clear** starts a new call and resets it.
+- The ledger and request flags are persisted in `UserDefaults`
+  (`runningLedger`, `prescriptionRequestDetected`,
+  `appointmentRequestDetected`) so a crash or a backgrounded call does not lose
+  them. **Clear** starts a new call and resets them.
 
 Because the default prompt asks for the complete ledger on every turn, the
 cadence is a real tradeoff: a 10–15 second interval keeps the per-update prompt
@@ -132,15 +151,15 @@ preview. Opening a call shows:
 
 - The exact system instructions and user prompt strings passed to
   `LanguageModelSession`.
-- The streamed output (or the partial output if the call was cancelled).
+- The complete output (or the partial output if the call was cancelled).
 - Any retry note or error message.
 - Copy actions for the full request, the user prompt, and the output.
 
-The log includes ledger updates, retries, and ledger-compaction calls, and it is
-kept in memory only. It is not written to `UserDefaults` and disappears when the
-app quits. **Clear** in the history screen empties it; the main **Clear** button
-does not, so starting a new call leaves the previous call's calls inspectable
-until the app exits.
+The log includes ledger updates, intent-classification calls, retries, and
+ledger-compaction calls, and it is kept in memory only. It is not written to
+`UserDefaults` and disappears when the app quits. **Clear** in the history screen
+empties it; the main **Clear** button does not, so starting a new call leaves
+the previous call's calls inspectable until the app exits.
 
 ## Requirements
 
@@ -193,7 +212,9 @@ precision: palettized on iOS, fp16 on macOS).
 ## Files
 
 - `ContentView.swift` — UI
+- `DefaultSystemPrompt.md` — pass-one ledger-update prompt
+- `DefaultClassificationPrompt.md` — pass-two classification prompt template
 - `TesterViewModel.swift` — ledger state, send loop, speed settings, and app state
 - `LiveSpeechTranscriber.swift` — microphone capture and live transcription
 - `SpeakerDiarization.swift` — FluidAudio Sortformer speaker labels
-- `FoundationModelClient.swift` — stateless ledger updates through Foundation Models
+- `FoundationModelClient.swift` — two-pass stateless ledger updates and intent classification through Foundation Models
